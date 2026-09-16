@@ -27,8 +27,7 @@ jetsam propose -include-unreferenced
 ```
 
 `propose` prints the pull request it would open -- the diff to your scrape
-config and the PR body -- and opens nothing. Add `-apply -owner OWNER -repo
-REPO` to actually open it, with a GitHub token in `$GITHUB_TOKEN`:
+config and the PR body -- and opens nothing.
 
 By default `propose` only ever proposes a metric backed by real evidence
 that nothing reads it, which in v0.1 (no query log support yet) means it
@@ -38,6 +37,9 @@ see ad-hoc or Grafana Explore queries against them. The PR body states
 which grade every drop rests on and carries an extra warning wherever that
 grade is `unreferenced`; a non-empty set of unreadable rules still forbids
 every drop regardless of this flag.
+
+Add `-apply -owner OWNER -repo REPO` to actually open it, with a GitHub
+token in `$GITHUB_TOKEN`:
 
 ```
 export GITHUB_TOKEN=...
