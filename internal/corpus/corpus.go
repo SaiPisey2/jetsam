@@ -34,18 +34,20 @@ func Build(rules []promapi.Rule, allMetrics []string) Corpus {
 	c := Corpus{Used: map[string]bool{}, Produced: map[string]bool{}}
 	for _, r := range rules {
 		c.Queries++
-		refs, err := Extract(r.Query)
-		if err != nil {
-			// A rule jetsam cannot read must contribute nothing in either
-			// direction: not to Used (it might reference anything) and not
-			// to Produced (jetsam cannot even trust that this is what the
-			// rule claims to write). continue must run before either map is
-			// touched.
-			c.Blocked = append(c.Blocked, fmt.Sprintf("rule %s/%s: %v", r.Group, r.Name, err))
-			continue
-		}
+		// What a recording rule WRITES comes from the rules API -- its Name
+		// and Type -- independently of whether jetsam can parse its query.
+		// A parse failure bounds only what the rule READS, so Produced is
+		// populated unconditionally here, before the query is even looked
+		// at, and stays protected even for a rule that ends up in Blocked.
 		if r.Type == "recording" {
 			c.Produced[r.Name] = true
+		}
+		refs, err := Extract(r.Query)
+		if err != nil {
+			// A rule jetsam cannot parse might read anything, so it must
+			// contribute no reads: Used is gated on a successful Extract.
+			c.Blocked = append(c.Blocked, fmt.Sprintf("rule %s/%s: %v", r.Group, r.Name, err))
+			continue
 		}
 		for _, m := range refs.Resolve(allMetrics) {
 			c.Used[m] = true

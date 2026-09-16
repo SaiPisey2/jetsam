@@ -57,17 +57,18 @@ func TestBuildBlocksOnAnUnparseableQuery(t *testing.T) {
 	}
 }
 
-// TestBuildGivesABlockedRuleNoEffectAtAll pins the invariant that a rule
-// jetsam cannot read must contribute nothing, in either direction: not to
-// Used (an unreadable query's text may name a metric it doesn't actually
-// touch, or may touch metrics it doesn't name) and not to Produced (jetsam
-// cannot trust that a rule which failed to parse is even what it claims to
-// write). This must be enforced by Build itself -- by never touching either
-// map before a parse error is checked -- rather than resting on the
-// incidental fact that Extract's error path happens to return a zero-value
-// Refs{} today. If that contract ever changed, a silent regression here
-// would let jetsam propose drops based on evidence it could not read.
-func TestBuildGivesABlockedRuleNoEffectAtAll(t *testing.T) {
+// TestBuildProtectsABlockedRecordingRulesOutput pins an asymmetry: what a
+// recording rule WRITES is reported by the rules API as its Name and Type,
+// independently of whether jetsam can parse its query, so a parse failure
+// must never strip it from Produced -- doing so would make that series
+// eligible for deletion, when jetsam knows with certainty it is written.
+// What the rule READS is a different story: an unparseable query might read
+// anything, so Used stays gated on a successful Extract. Produced is the
+// safe direction to protect because it is what excludes a metric from being
+// a drop candidate downstream; Used is the safe direction to withhold
+// because asserting a read jetsam did not actually verify is what would
+// license an unsound drop of something else entirely.
+func TestBuildProtectsABlockedRecordingRulesOutput(t *testing.T) {
 	rules := []promapi.Rule{
 		{Group: "g", Name: "Good", Type: "alerting", Query: `up == 0`},
 		{Group: "g", Name: "Broken", Type: "recording", Query: `rate(x[$interval])`},
@@ -78,13 +79,13 @@ func TestBuildGivesABlockedRuleNoEffectAtAll(t *testing.T) {
 		t.Error("up: Used = false, want true — the clean rule was processed normally")
 	}
 	if c.Used["x"] {
-		t.Error("x: Used = true — the broken rule's query text names x, but an unreadable rule must contribute nothing")
+		t.Error("x: Used = true — the broken rule's query text names x, but an unreadable rule must contribute no reads")
 	}
 	if c.Used["unrelated"] {
 		t.Error("unrelated: Used = true, want false")
 	}
-	if c.Produced["Broken"] {
-		t.Error("Produced[Broken] = true — a rule that could not be parsed must not even register what it claims to produce")
+	if !c.Produced["Broken"] {
+		t.Error("Produced[Broken] = false, want true — the rules API says this rule writes this series regardless of whether its query parses, so it must stay protected from deletion")
 	}
 	if len(c.Blocked) != 1 {
 		t.Fatalf("Blocked = %v, want exactly one entry", c.Blocked)
