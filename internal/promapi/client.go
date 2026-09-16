@@ -138,7 +138,7 @@ func (c *Client) QueryJobsFor(ctx context.Context, metric string) ([]string, err
 			Metric map[string]string `json:"metric"`
 		} `json:"result"`
 	}
-	q := url.Values{"query": []string{fmt.Sprintf("count by (job) (%s)", metric)}}
+	q := url.Values{"query": []string{fmt.Sprintf("count by (job) ({__name__=%q})", metric)}}
 	if err := c.get(ctx, "/api/v1/query", q, &data); err != nil {
 		return nil, err
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 )
@@ -44,5 +45,145 @@ func TestTSDBStatusRejectsAnErrorStatus(t *testing.T) {
 	// looks unused.
 	if _, err := New(srv.URL, 5*time.Second).TSDBStatus(context.Background(), 500); err == nil {
 		t.Fatal("TSDBStatus succeeded on a status:\"error\" body, want an error")
+	}
+}
+
+func TestAlertingAndRecordingRulesReturnsBothKindsWithGroupAndType(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{"groups":[
+			{"name":"group1","rules":[
+				{"name":"HighErrorRate","query":"rate(errors[5m]) > 0.1","type":"alerting"},
+				{"name":"job:requests:rate5m","query":"rate(requests_total[5m])","type":"recording"}
+			]},
+			{"name":"group2","rules":[]}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, 5*time.Second).AlertingAndRecordingRules(context.Background())
+	if err != nil {
+		t.Fatalf("AlertingAndRecordingRules: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d rules, want 2 (the empty group2 must contribute nothing)", len(got))
+	}
+
+	byName := make(map[string]Rule, len(got))
+	for _, r := range got {
+		byName[r.Name] = r
+	}
+
+	alert, ok := byName["HighErrorRate"]
+	if !ok {
+		t.Fatal("missing rule HighErrorRate")
+	}
+	if alert.Type != "alerting" {
+		t.Errorf("HighErrorRate.Type = %q, want %q", alert.Type, "alerting")
+	}
+	if alert.Group != "group1" {
+		t.Errorf("HighErrorRate.Group = %q, want %q", alert.Group, "group1")
+	}
+	if alert.Query != "rate(errors[5m]) > 0.1" {
+		t.Errorf("HighErrorRate.Query = %q, want %q", alert.Query, "rate(errors[5m]) > 0.1")
+	}
+
+	rec, ok := byName["job:requests:rate5m"]
+	if !ok {
+		t.Fatal("missing rule job:requests:rate5m")
+	}
+	if rec.Type != "recording" {
+		t.Errorf("job:requests:rate5m.Type = %q, want %q", rec.Type, "recording")
+	}
+	if rec.Group != "group1" {
+		t.Errorf("job:requests:rate5m.Group = %q, want %q", rec.Group, "group1")
+	}
+}
+
+func TestAlertingAndRecordingRulesRejectsAnErrorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"status":"error","errorType":"bad_data","error":"bad rules query"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL, 5*time.Second).AlertingAndRecordingRules(context.Background()); err == nil {
+		t.Fatal("AlertingAndRecordingRules succeeded on a status:\"error\" body, want an error")
+	}
+}
+
+func TestAlertingAndRecordingRulesOnAQuietPrometheusIsEmptyNotAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"groups":[]}}`))
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, 5*time.Second).AlertingAndRecordingRules(context.Background())
+	if err != nil {
+		t.Fatalf("AlertingAndRecordingRules: %v, want no error for a Prometheus with no rule groups", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d rules, want 0", len(got))
+	}
+}
+
+func TestQueryJobsForReturnsOnlySeriesCarryingAJobLabel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{"result":[
+			{"metric":{"job":"node-exporter","instance":"a"}},
+			{"metric":{"job":"cadvisor","instance":"b"}},
+			{"metric":{"instance":"c"}}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, 5*time.Second).QueryJobsFor(context.Background(), "up")
+	if err != nil {
+		t.Fatalf("QueryJobsFor: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d jobs %v, want 2 (the label-less series must be skipped, not counted as an empty job)", len(got), got)
+	}
+	sort.Strings(got)
+	want := []string{"cadvisor", "node-exporter"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("jobs[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	for _, j := range got {
+		if j == "" {
+			t.Error("got an empty job value, want the label-less series skipped entirely")
+		}
+	}
+}
+
+func TestQueryJobsForRejectsAnErrorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"status":"error","errorType":"bad_data","error":"invalid query"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL, 5*time.Second).QueryJobsFor(context.Background(), "up"); err == nil {
+		t.Fatal("QueryJobsFor succeeded on a status:\"error\" body, want an error")
+	}
+}
+
+func TestQueryJobsForQuotesAMetricNameThatIsAPromQLKeyword(t *testing.T) {
+	const wantQuery = `count by (job) ({__name__="on"})`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("query"); got != wantQuery {
+			t.Errorf("query = %q, want %q: an unquoted metric name that is also a PromQL keyword produces a malformed query", got, wantQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{"result":[]}}`))
+	}))
+	defer srv.Close()
+
+	// "on" is a syntactically valid Prometheus metric name and also a
+	// PromQL vector-matching keyword; unquoted interpolation breaks it.
+	if _, err := New(srv.URL, 5*time.Second).QueryJobsFor(context.Background(), "on"); err != nil {
+		t.Fatalf("QueryJobsFor: %v", err)
 	}
 }
