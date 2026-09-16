@@ -355,3 +355,32 @@ func TestDoRejectsAnOversizedBodyRatherThanTruncating(t *testing.T) {
 		t.Errorf("error does not report the size limit was exceeded: %v", err)
 	}
 }
+
+// TestDoRedactsTokenFromErrorBody: a reverse proxy, WAF or misconfigured
+// GitHub Enterprise gateway can reflect the incoming Authorization header
+// into its error body -- a realistic failure mode, not a hypothetical one.
+// This stub server does exactly that on every non-2xx response, the same
+// way a real one might. Every one of do()'s call sites (FindPR here,
+// EnsureBranch and CommitFiles by the same code path) must never let that
+// token reach the error string this provider returns, since it ends up on
+// stderr and, in CI, gets archived, screenshotted and pasted into tickets.
+func TestDoRedactsTokenFromErrorBody(t *testing.T) {
+	const token = "ghp_supersecrettoken12345"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, `{"message":"upstream rejected request","received_auth":%q}`, r.Header.Get("Authorization"))
+	}))
+	defer srv.Close()
+
+	g := &GitHubProvider{BaseURL: srv.URL, Token: token, Client: &http.Client{Timeout: 5 * time.Second}}
+	_, err := g.FindPR(context.Background(), "acme", "rules", "main", "somebranch")
+	if err == nil {
+		t.Fatal("FindPR succeeded against a 500 response, want an error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("error echoes the bearer token back out:\n%v", err)
+	}
+	if !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Errorf("error does not mark the token as redacted:\n%v", err)
+	}
+}

@@ -123,7 +123,18 @@ func (g *GitHubProvider) do(ctx context.Context, method, path string, body any, 
 		return resp, fmt.Errorf("%s %s: response body exceeds %d byte limit", method, path, maxResponseBytes)
 	}
 	if resp.StatusCode >= 300 {
-		return resp, fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(data)))
+		// A reverse proxy, WAF or misconfigured GitHub Enterprise gateway
+		// can reflect the incoming Authorization header back into an error
+		// body (a realistic failure mode, not a hypothetical one). This
+		// error is printed to stderr, and in CI stderr gets archived,
+		// screenshotted and pasted into tickets -- so redact the token out
+		// of the body before it ever reaches fmt.Errorf, the same way
+		// safeURL above keeps a token out of a *url.Error.
+		body := strings.TrimSpace(string(data))
+		if g.Token != "" {
+			body = strings.ReplaceAll(body, g.Token, "[REDACTED]")
+		}
+		return resp, fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, body)
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
