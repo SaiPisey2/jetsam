@@ -330,7 +330,18 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 		// success, not failure: a metric declined because its job lives in
 		// a different file is jetsam correctly refusing to guess, exactly
 		// like a blocked rule -- not a reason to exit non-zero.
-		fmt.Fprintln(stdout, "dry run: nothing opened. Re-run with -apply to open this PR.")
+		//
+		// The message must say what actually happened. Printing the dry-run
+		// "re-run with -apply" line unconditionally here was wrong on two
+		// counts: it told an operator who already passed -apply to do
+		// something they had just done, and it implied a PR would have
+		// opened if only -apply had been given, when in fact there was
+		// nothing to open either way.
+		if *apply {
+			fmt.Fprintln(stdout, "apply: nothing to propose, so nothing was opened.")
+		} else {
+			fmt.Fprintln(stdout, "dry run: nothing to propose, so there is nothing -apply would open either.")
+		}
 		return 0
 	}
 

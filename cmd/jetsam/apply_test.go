@@ -157,10 +157,61 @@ func TestProposeApplyWithNothingToProposeOpensNothing(t *testing.T) {
 	if !strings.Contains(out, "nothing to propose") {
 		t.Errorf("output does not say nothing was proposed: %q", out)
 	}
+	// This is the fix for the Minor finding: with -apply given and nothing
+	// to propose, the output must say so -- not the dry-run "re-run with
+	// -apply" line, which would tell an operator who already passed
+	// -apply to do the very thing they just did, and would misreport a
+	// no-op apply run as though it had just opened something.
+	if strings.Contains(out, "re-run with -apply") || strings.Contains(out, "Re-run with -apply") {
+		t.Errorf("an -apply run that found nothing to propose still told the operator to re-run with -apply: %q", out)
+	}
+	if !strings.Contains(out, "nothing was opened") {
+		t.Errorf("output does not say nothing was opened for this -apply run: %q", out)
+	}
 	// newProvider is only called on the path that would actually open a
 	// PR; with nothing droppable it must never be reached at all.
 	if fake != nil {
 		t.Fatal("newProvider was called although there was nothing to propose; -apply must not touch the forge in that case")
+	}
+}
+
+// TestProposeDryRunWithNothingToProposeSaysSo is the dry-run counterpart:
+// without -apply, and with nothing droppable, the output must describe a
+// dry run with nothing to propose -- not claim a PR would have opened.
+func TestProposeDryRunWithNothingToProposeSaysSo(t *testing.T) {
+	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/status/tsdb":
+			w.Write([]byte(`{"status":"success","data":{"seriesCountByMetricName":[
+				{"name":"go_gc_duration_seconds","value":1258}]}}`))
+		case "/api/v1/rules":
+			w.Write([]byte(`{"status":"success","data":{"groups":[]}}`))
+		default:
+			w.Write([]byte(`{"status":"success","data":{"result":[]}}`))
+		}
+	}))
+	defer prom.Close()
+
+	dir := t.TempDir()
+	promYAMLPath := filepath.Join(dir, "prometheus.yml")
+	os.WriteFile(promYAMLPath, []byte("global:\n  scrape_interval: 15s\nscrape_configs:\n  - job_name: api\n    static_configs:\n      - targets: ['localhost:9100']\n"), 0o644)
+
+	cfgPath := filepath.Join(dir, "jetsam.yaml")
+	os.WriteFile(cfgPath, []byte("prometheus:\n  url: "+prom.URL+"\n  timeout: 5s\nprometheus_file: "+promYAMLPath+"\n"), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	rc := proposeCmd([]string{"-config", cfgPath}, &stdout, &stderr, noEnv, failProvider(t))
+	if rc != 0 {
+		t.Fatalf("proposeCmd = %d, want 0: stderr=%s", rc, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "dry run") {
+		t.Errorf("output does not identify itself as a dry run: %q", out)
+	}
+	if !strings.Contains(out, "nothing to propose") {
+		t.Errorf("output does not say nothing was proposed: %q", out)
 	}
 }
 
