@@ -5,12 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege by default: nothing here needs to write to the
+# repository, and a workflow that cannot write cannot be turned into one
+# that pushes. Actions are pinned to commit SHAs rather than tags -- a tag
+# is mutable, so `@v4` is a promise the action's owner can silently change
+# under this repository at any time.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.27'
       - run: go vet ./...
@@ -20,7 +28,7 @@ jobs:
   provenance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: Check commit trailers
@@ -31,12 +39,21 @@ jobs:
           fi
           echo "history clean"
 
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27'
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
   integration:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.27'
       - run: go test ./internal/e2e/ -tags=integration -v -count=1
