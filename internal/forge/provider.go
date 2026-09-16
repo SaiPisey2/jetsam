@@ -41,10 +41,11 @@ type FileChange struct {
 	Message     string
 }
 
-// Provider is what a PR bot needs from a forge, kept narrow and
+// Provider is what jetsam needs from a forge, kept narrow and
 // forge-agnostic so GitHub (the only implementation today) is not baked
-// into the rest of this package. A GitLab provider implements the same
-// interface without any change to Proposal, Build or Runner.
+// into the rest of this package. A GitLab provider would implement the
+// same interface without any change to emit.Apply or cmd/jetsam, which
+// are the only callers.
 type Provider interface {
 	// FindPR returns the most relevant existing PR whose head is branch
 	// against base, or nil if the branch has never had one. An open PR is
@@ -56,20 +57,20 @@ type Provider interface {
 	// and decided against it. Listing only open PRs makes that decision
 	// invisible and reopens the same rejected PR on the next run, and the
 	// run after that -- which is how a bot gets blocked at the org level.
-	// Runner calls this before opening anything.
+	// emit.Apply calls this before opening anything.
 	FindPR(ctx context.Context, owner, repo, base, branch string) (*PullRequest, error)
 
 	// EnsureBranch creates branch pointing at base's current HEAD if branch
 	// does not already exist. Creating a branch that already exists
-	// (pointing anywhere) is not an error -- Runner relies on that for its
-	// own idempotence, and a branch a human has since pushed to must not be
-	// silently reset.
+	// (pointing anywhere) is not an error -- emit.Apply relies on that for
+	// its own idempotence, and a branch a human has since pushed to must
+	// not be silently reset.
 	EnsureBranch(ctx context.Context, owner, repo, branch, base string) error
 
 	// CommitFiles commits every change onto branch in one commit. Each
 	// FileChange.Content is the file's complete new content, not a diff --
-	// callers (Proposal.Render) already computed the minimal, surgical
-	// result.
+	// the caller (emit.Render, via cmd/jetsam's propose command) already
+	// computed the minimal, surgical result.
 	//
 	// Because it is a whole file, an implementation MUST NOT write it
 	// blind. It has to read the file it is about to replace and refuse the

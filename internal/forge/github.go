@@ -152,7 +152,7 @@ type ghPull struct {
 // again. In someone else's repository, on a schedule.
 //
 // An open PR wins when there is one (that is the ordinary idempotence
-// case). Otherwise the most recent closed PR is returned so Runner can
+// case). Otherwise the most recent closed PR is returned so emit.Apply can
 // treat it as the decision it is. GitHub reports a merged PR as closed with
 // merged_at set; State distinguishes them, and neither is a reason to open
 // a second one.

@@ -8,7 +8,7 @@ import (
 
 // FakeProvider is an in-memory Provider for tests: no network call ever
 // leaves the process. It is exported (not a _test.go type) so both this
-// package's tests and cmd/noisefloor's can use one without duplicating it.
+// package's tests and cmd/jetsam's can use one without duplicating it.
 type FakeProvider struct {
 	mu sync.Mutex
 
@@ -29,7 +29,7 @@ type FakeProvider struct {
 
 	// FailEnsureBranch, FailCommit, FailOpenPR, when non-nil, are returned
 	// by the matching method instead of succeeding -- for exercising
-	// Runner's error handling without a real network failure.
+	// cmd/jetsam's -apply error handling without a real network failure.
 	FailEnsureBranch error
 	FailCommit       error
 	FailOpenPR       error

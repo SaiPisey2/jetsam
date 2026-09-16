@@ -106,13 +106,13 @@ const localFile = "groups:\n  - name: demo\n    rules:\n      - alert: A\n      
 // computed whole file would drop their change without a word.
 func TestCommitFilesRefusesWhenTheBranchBlobDiffers(t *testing.T) {
 	stub := &ghStub{blobs: map[string]string{
-		"main:rules/demo.yml":         localFile,
-		"noisefloor/x:rules/demo.yml": localFile + "      - alert: B\n        expr: up == 1\n",
+		"main:rules/demo.yml":     localFile,
+		"jetsam/x:rules/demo.yml": localFile + "      - alert: B\n        expr: up == 1\n",
 	}}
 	g := stub.provider(t)
 
-	err := g.CommitFiles(context.Background(), "acme", "rules", "main", "noisefloor/x", []FileChange{
-		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "noisefloor: retire A"},
+	err := g.CommitFiles(context.Background(), "acme", "rules", "main", "jetsam/x", []FileChange{
+		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "jetsam: retire A"},
 	})
 	if err == nil {
 		t.Fatal("CommitFiles overwrote a branch that had moved on")
@@ -130,13 +130,13 @@ func TestCommitFilesRefusesWhenTheBranchBlobDiffers(t *testing.T) {
 // since, so merging this PR would revert base's change.
 func TestCommitFilesRefusesWhenTheBaseBlobDiffers(t *testing.T) {
 	stub := &ghStub{blobs: map[string]string{
-		"main:rules/demo.yml":         localFile + "      - alert: NewFromSomeoneElse\n        expr: up == 2\n",
-		"noisefloor/x:rules/demo.yml": localFile,
+		"main:rules/demo.yml":     localFile + "      - alert: NewFromSomeoneElse\n        expr: up == 2\n",
+		"jetsam/x:rules/demo.yml": localFile,
 	}}
 	g := stub.provider(t)
 
-	err := g.CommitFiles(context.Background(), "acme", "rules", "main", "noisefloor/x", []FileChange{
-		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "noisefloor: retire A"},
+	err := g.CommitFiles(context.Background(), "acme", "rules", "main", "jetsam/x", []FileChange{
+		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "jetsam: retire A"},
 	})
 	if err == nil {
 		t.Fatal("CommitFiles proceeded against a base that had moved on")
@@ -156,7 +156,7 @@ func TestCommitFilesRefusesWhenTheBaseBlobDiffers(t *testing.T) {
 func TestCommitFilesRefusesWhenTheBaseBlobFetchErrors(t *testing.T) {
 	stub := &ghStub{
 		blobs: map[string]string{
-			"noisefloor/x:rules/demo.yml": localFile,
+			"jetsam/x:rules/demo.yml": localFile,
 		},
 		errOn: map[string]int{
 			"main:rules/demo.yml": http.StatusInternalServerError,
@@ -164,8 +164,8 @@ func TestCommitFilesRefusesWhenTheBaseBlobFetchErrors(t *testing.T) {
 	}
 	g := stub.provider(t)
 
-	err := g.CommitFiles(context.Background(), "acme", "rules", "main", "noisefloor/x", []FileChange{
-		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "noisefloor: retire A"},
+	err := g.CommitFiles(context.Background(), "acme", "rules", "main", "jetsam/x", []FileChange{
+		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "jetsam: retire A"},
 	})
 	if err == nil {
 		t.Fatal("CommitFiles proceeded after the base-blob fetch errored")
@@ -181,13 +181,13 @@ func TestCommitFilesRefusesWhenTheBaseBlobFetchErrors(t *testing.T) {
 // refused.
 func TestCommitFilesWritesWhenTheFileIsNewOnBase(t *testing.T) {
 	stub := &ghStub{blobs: map[string]string{
-		"noisefloor/x:rules/demo.yml": localFile,
+		"jetsam/x:rules/demo.yml": localFile,
 		// deliberately no "main:rules/demo.yml" entry.
 	}}
 	g := stub.provider(t)
 
-	if err := g.CommitFiles(context.Background(), "acme", "rules", "main", "noisefloor/x", []FileChange{
-		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "noisefloor: add A"},
+	if err := g.CommitFiles(context.Background(), "acme", "rules", "main", "jetsam/x", []FileChange{
+		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "jetsam: add A"},
 	}); err != nil {
 		t.Fatalf("CommitFiles refused a file that is legitimately new on base: %v", err)
 	}
@@ -200,13 +200,13 @@ func TestCommitFilesWritesWhenTheFileIsNewOnBase(t *testing.T) {
 // safety check must not stand in the way of the commit it exists to guard.
 func TestCommitFilesWritesWhenEverythingAgrees(t *testing.T) {
 	stub := &ghStub{blobs: map[string]string{
-		"main:rules/demo.yml":         localFile,
-		"noisefloor/x:rules/demo.yml": localFile,
+		"main:rules/demo.yml":     localFile,
+		"jetsam/x:rules/demo.yml": localFile,
 	}}
 	g := stub.provider(t)
 
-	if err := g.CommitFiles(context.Background(), "acme", "rules", "main", "noisefloor/x", []FileChange{
-		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "noisefloor: retire A"},
+	if err := g.CommitFiles(context.Background(), "acme", "rules", "main", "jetsam/x", []FileChange{
+		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "jetsam: retire A"},
 	}); err != nil {
 		t.Fatalf("CommitFiles: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestCommitFilesRefusesAMissingFile(t *testing.T) {
 	stub := &ghStub{blobs: map[string]string{}}
 	g := stub.provider(t)
 
-	err := g.CommitFiles(context.Background(), "acme", "rules", "main", "noisefloor/x", []FileChange{
+	err := g.CommitFiles(context.Background(), "acme", "rules", "main", "jetsam/x", []FileChange{
 		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "m"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
@@ -242,11 +242,11 @@ func TestCommitFilesRefusesAMissingFile(t *testing.T) {
 func TestFindPRReportsAClosedPR(t *testing.T) {
 	stub := &ghStub{pulls: []map[string]any{
 		{"number": 7, "html_url": "https://example/7", "state": "closed",
-			"head": map[string]any{"ref": "noisefloor/x"}},
+			"head": map[string]any{"ref": "jetsam/x"}},
 	}}
 	g := stub.provider(t)
 
-	pr, err := g.FindPR(context.Background(), "acme", "rules", "main", "noisefloor/x")
+	pr, err := g.FindPR(context.Background(), "acme", "rules", "main", "jetsam/x")
 	if err != nil {
 		t.Fatalf("FindPR: %v", err)
 	}
@@ -263,13 +263,13 @@ func TestFindPRReportsAClosedPR(t *testing.T) {
 func TestFindPRPrefersTheOpenPR(t *testing.T) {
 	stub := &ghStub{pulls: []map[string]any{
 		{"number": 9, "html_url": "https://example/9", "state": "closed",
-			"head": map[string]any{"ref": "noisefloor/x"}},
+			"head": map[string]any{"ref": "jetsam/x"}},
 		{"number": 11, "html_url": "https://example/11", "state": "open",
-			"head": map[string]any{"ref": "noisefloor/x"}},
+			"head": map[string]any{"ref": "jetsam/x"}},
 	}}
 	g := stub.provider(t)
 
-	pr, err := g.FindPR(context.Background(), "acme", "rules", "main", "noisefloor/x")
+	pr, err := g.FindPR(context.Background(), "acme", "rules", "main", "jetsam/x")
 	if err != nil {
 		t.Fatalf("FindPR: %v", err)
 	}
@@ -284,11 +284,11 @@ func TestFindPRReportsAMergedPRAsMerged(t *testing.T) {
 	merged := "2026-09-01T00:00:00Z"
 	stub := &ghStub{pulls: []map[string]any{
 		{"number": 3, "html_url": "https://example/3", "state": "closed", "merged_at": merged,
-			"head": map[string]any{"ref": "noisefloor/x"}},
+			"head": map[string]any{"ref": "jetsam/x"}},
 	}}
 	g := stub.provider(t)
 
-	pr, err := g.FindPR(context.Background(), "acme", "rules", "main", "noisefloor/x")
+	pr, err := g.FindPR(context.Background(), "acme", "rules", "main", "jetsam/x")
 	if err != nil {
 		t.Fatalf("FindPR: %v", err)
 	}
