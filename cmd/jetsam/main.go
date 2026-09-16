@@ -444,11 +444,20 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 		return 1
 	}
 
-	if diff := unifiedDiff(cfg.PrometheusFile, string(promYAML), newYAML); diff != "" {
-		fmt.Fprint(stdout, diff)
-	} else {
-		fmt.Fprintf(stdout, "(no change: %s already carries every drop rule below)\n", cfg.PrometheusFile)
+	diff := unifiedDiff(cfg.PrometheusFile, string(promYAML), newYAML)
+	if diff == "" {
+		// The target file already carries every drop rule this run would
+		// propose -- the ordinary case on a second run after the last
+		// proposal merged. There is nothing to commit: falling through to
+		// applyAndReport here would create a branch, commit byte-identical
+		// content onto it, and then have GitHub reject OpenPR with 422 "No
+		// commits between", every single run, leaving a stray branch behind
+		// each time. Return before touching the forge at all, with -apply
+		// or without it -- neither has anything to do.
+		fmt.Fprintf(stdout, "%s already carries every drop rule below; nothing to open.\n", cfg.PrometheusFile)
+		return 0
 	}
+	fmt.Fprint(stdout, diff)
 	fmt.Fprintln(stdout)
 
 	// Every declined-by-missing-job candidate is reported in the PR body
