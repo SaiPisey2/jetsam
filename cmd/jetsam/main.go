@@ -448,10 +448,14 @@ func applyAndReport(ctx context.Context, stdout, stderr io.Writer, p forge.Provi
 const diffContext = 3
 
 // diffLine is one line of an old/new comparison, tagged with how it
-// changed: ' ' unchanged, '-' removed, '+' added.
+// changed: ' ' unchanged, '-' removed, '+' added. noEOL carries forward
+// eofLine's flag -- see eofLine -- so formatHunks knows, for this exact
+// printed line, whether it is a file's true final line with no trailing
+// newline.
 type diffLine struct {
-	op   byte
-	text string
+	op    byte
+	text  string
+	noEOL bool
 }
 
 // unifiedDiff renders old -> new in the style of `diff -u`, computed from a
@@ -460,12 +464,10 @@ type diffLine struct {
 // description of the change -- which only holds if the diff is one `patch`
 // can actually apply, trailing newline included.
 func unifiedDiff(path, oldText, newText string) string {
-	oldLines := splitLines(oldText)
-	newLines := splitLines(newText)
-	ops := diffLCS(oldLines, newLines)
-	ops, oldMarkIdx, newMarkIdx := markMissingTrailingNewlines(ops, oldLines, newLines,
-		hasTrailingNewline(oldText), hasTrailingNewline(newText))
-	return formatHunks(path, ops, oldMarkIdx, newMarkIdx)
+	oldLines := eofLines(splitLines(oldText), hasTrailingNewline(oldText))
+	newLines := eofLines(splitLines(newText), hasTrailingNewline(newText))
+	ops := normalizeChangeOrder(diffLCS(oldLines, newLines))
+	return formatHunks(path, ops)
 }
 
 // splitLines splits on "\n" without discarding a final line that has no
@@ -494,78 +496,38 @@ func hasTrailingNewline(s string) bool {
 // next onto the same line or start a new one.
 const noNewlineMarker = `\ No newline at end of file`
 
-// markMissingTrailingNewlines adjusts ops so that either file's actual
-// final line, if it lacks a trailing newline, can carry that fact -- even
-// when line-text comparison alone would have folded it into an
-// unremarkable, shared context line.
+// eofLine is one line of a file, together with whether it is that file's
+// own true final line while the file itself has no trailing newline.
 //
-// diffLCS compares line TEXT only; whether a file's very last line ends in
-// "\n" is tracked separately here, as one bit per file, which is how a real
-// diff/patch toolchain models it too. Two problems follow from keeping that
-// bit separate from line comparison:
-//
-//  1. Two files whose lines are textually identical but which disagree on
-//     the final newline ("a\nb\n" vs "a\nb") diff to an empty op list --
-//     "no change" -- even though the bytes differ.
-//  2. When a file's true final line survives into the diff as a plain
-//     context line (' ', shared with the other file at that position),
-//     attaching a "no trailing newline" fact to it would silently claim it
-//     for the OTHER file too, which may be wrong: the other file's line at
-//     that position is not necessarily its own final line -- more content
-//     can follow it there.
-//
-// Both are fixed the same way: whichever side needs to report "my last
-// line has no trailing newline" gets its own copy of that line. A shared
-// context op is split into a matching removal and addition so each side's
-// copy can carry its own marker independently; an op that is already a
-// distinct '-' or '+' entry needs no split.
-func markMissingTrailingNewlines(ops []diffLine, oldLines, newLines []string, oldNL, newNL bool) (out []diffLine, oldMarkIdx, newMarkIdx int) {
-	out = ops
-	oldMarkIdx, newMarkIdx = -1, -1
-
-	// lastConsuming returns the highest index of an op that consumes a line
-	// from the side notOp does NOT represent -- i.e. the last op that is
-	// not notOp. Old-consuming ops are '-' and ' '; new-consuming ops are
-	// '+' and ' '. Because each side's lines are consumed strictly in the
-	// order they appear, this index always identifies the op that consumed
-	// that side's true final line, regardless of what the other side does
-	// around it.
-	lastConsuming := func(notOp byte) int {
-		for i := len(out) - 1; i >= 0; i-- {
-			if out[i].op != notOp {
-				return i
-			}
-		}
-		return -1
-	}
-
-	if len(oldLines) > 0 && !oldNL {
-		if i := lastConsuming('+'); i >= 0 {
-			if out[i].op == ' ' {
-				out = spliceReplace(out, i, diffLine{'-', out[i].text}, diffLine{'+', out[i].text})
-			}
-			oldMarkIdx = i
-		}
-	}
-	if len(newLines) > 0 && !newNL {
-		if i := lastConsuming('-'); i >= 0 {
-			if out[i].op == ' ' {
-				out = spliceReplace(out, i, diffLine{'-', out[i].text}, diffLine{'+', out[i].text})
-				i++ // the '+' half is new's own copy of the line.
-			}
-			newMarkIdx = i
-		}
-	}
-	return out, oldMarkIdx, newMarkIdx
+// diffLCS compares eofLine values for equality, not bare text, and that is
+// the whole point of this type: a line's text being identical to a line in
+// the other file is not the same fact as the two of them agreeing about
+// where their file ends. Comparing on text alone lets a file's true final
+// line be silently treated as an ordinary shared context line matching
+// some line elsewhere that is emphatically not that file's end -- which is
+// exactly how a "no trailing newline" fact for one file gets attached to a
+// position that, for the OTHER file, has more content after it. Requiring
+// noEOL to match too forces diffLCS itself to treat such a line as a real
+// change (an explicit removal and/or addition) whenever the two files
+// disagree about it, which is what real diff/patch tooling does, and which
+// is what keeps every later "\ No newline" marker attached to a line that
+// is provably that file's actual last line with nothing of that file's own
+// content after it anywhere in the diff.
+type eofLine struct {
+	text  string
+	noEOL bool
 }
 
-// spliceReplace returns ops with the single entry at i replaced by a and b,
-// in that order.
-func spliceReplace(ops []diffLine, i int, a, b diffLine) []diffLine {
-	out := make([]diffLine, 0, len(ops)+1)
-	out = append(out, ops[:i]...)
-	out = append(out, a, b)
-	out = append(out, ops[i+1:]...)
+// eofLines tags lines with eofLine.noEOL: true for the last element only,
+// and only when hasNL is false.
+func eofLines(lines []string, hasNL bool) []eofLine {
+	out := make([]eofLine, len(lines))
+	for i, t := range lines {
+		out[i] = eofLine{text: t}
+	}
+	if n := len(out); n > 0 && !hasNL {
+		out[n-1].noEOL = true
+	}
 	return out
 }
 
@@ -573,7 +535,16 @@ func spliceReplace(ops []diffLine, i int, a, b diffLine) []diffLine {
 // and added lines, via the longest common subsequence of the two. old and
 // new are configuration files -- at most a few thousand lines -- so the
 // O(len(old)*len(new)) table this builds is not a concern.
-func diffLCS(old, new []string) []diffLine {
+//
+// Equality is eofLine equality (text AND noEOL), not text alone -- see
+// eofLine. This is what makes diffLCS itself choose the same alignment a
+// real diff tool would when either file's true final line is involved:
+// old="a\nb\n" against new="a" cannot line up old's "a" with new's "a" as
+// shared context, because new's "a" is its file's own (newline-less) end
+// and old's is not, so both of old's lines end up explicit removals and
+// new's "a" an explicit addition -- never a mismatched shared line quietly
+// carrying a fact that is only true for one side of it.
+func diffLCS(old, new []eofLine) []diffLine {
 	n, m := len(old), len(new)
 	dp := make([][]int, n+1)
 	for i := range dp {
@@ -597,23 +568,23 @@ func diffLCS(old, new []string) []diffLine {
 	for i > 0 && j > 0 {
 		switch {
 		case old[i-1] == new[j-1]:
-			ops = append(ops, diffLine{' ', old[i-1]})
+			ops = append(ops, diffLine{' ', old[i-1].text, old[i-1].noEOL})
 			i--
 			j--
 		case dp[i-1][j] >= dp[i][j-1]:
-			ops = append(ops, diffLine{'-', old[i-1]})
+			ops = append(ops, diffLine{'-', old[i-1].text, old[i-1].noEOL})
 			i--
 		default:
-			ops = append(ops, diffLine{'+', new[j-1]})
+			ops = append(ops, diffLine{'+', new[j-1].text, new[j-1].noEOL})
 			j--
 		}
 	}
 	for i > 0 {
-		ops = append(ops, diffLine{'-', old[i-1]})
+		ops = append(ops, diffLine{'-', old[i-1].text, old[i-1].noEOL})
 		i--
 	}
 	for j > 0 {
-		ops = append(ops, diffLine{'+', new[j-1]})
+		ops = append(ops, diffLine{'+', new[j-1].text, new[j-1].noEOL})
 		j--
 	}
 	for l, r := 0, len(ops)-1; l < r; l, r = l+1, r-1 {
@@ -622,13 +593,51 @@ func diffLCS(old, new []string) []diffLine {
 	return ops
 }
 
+// normalizeChangeOrder reorders every maximal run of consecutive non-context
+// ops (no ' ' between them) so every removal ('-') in the run precedes
+// every addition ('+'), preserving each side's own relative order. This is
+// the conventional diff -u ordering for a substitution, and it is not
+// merely cosmetic: diffLCS's backtrack, followed by the reversal needed to
+// present ops oldest-to-newest, can leave a '+' printed before a '-' that
+// logically replaces the same line (which side's tie-break the DP favors
+// decides which). Real `patch` accepts a hunk where a '+' is immediately
+// followed, with nothing between them, by a '-' -- but not when a
+// "\ No newline at end of file" marker sits between them: "marker, then
+// more content" is what patch calls malformed, and only the conventional
+// removals-then-additions order guarantees a marker attached to a file's
+// true final line is never followed by anything else for that run.
+func normalizeChangeOrder(ops []diffLine) []diffLine {
+	out := make([]diffLine, 0, len(ops))
+	for i := 0; i < len(ops); {
+		if ops[i].op == ' ' {
+			out = append(out, ops[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(ops) && ops[j].op != ' ' {
+			j++
+		}
+		for k := i; k < j; k++ {
+			if ops[k].op == '-' {
+				out = append(out, ops[k])
+			}
+		}
+		for k := i; k < j; k++ {
+			if ops[k].op == '+' {
+				out = append(out, ops[k])
+			}
+		}
+		i = j
+	}
+	return out
+}
+
 // formatHunks groups ops into unified-diff hunks, each padded with up to
 // diffContext lines of unchanged context on either side, merging two change
 // regions whose padding would otherwise overlap into a single hunk.
-// oldMarkIdx/newMarkIdx (-1 if not applicable) name the op, if any, that is
-// old's or new's true final line while that side lacks a trailing newline;
-// noNewlineMarker is printed immediately after whichever op line that is.
-func formatHunks(path string, ops []diffLine, oldMarkIdx, newMarkIdx int) string {
+// noNewlineMarker is printed immediately after any op whose noEOL is set.
+func formatHunks(path string, ops []diffLine) string {
 	var regions [][2]int
 	for i := 0; i < len(ops); {
 		if ops[i].op == ' ' {
@@ -699,14 +708,7 @@ func formatHunks(path string, ops []diffLine, oldMarkIdx, newMarkIdx int) string
 		for idx := lo; idx < hi; idx++ {
 			op := ops[idx]
 			fmt.Fprintf(&b, "%c%s\n", op.op, op.text)
-			// A context line (' ') can carry at most one of these -- see
-			// markMissingTrailingNewlines -- but a '-' only ever carries
-			// old's marker and a '+' only ever carries new's, so the two
-			// checks below can never both fire for the same line.
-			if idx == oldMarkIdx && op.op != '+' {
-				b.WriteString(noNewlineMarker + "\n")
-			}
-			if idx == newMarkIdx && op.op != '-' {
+			if op.noEOL {
 				b.WriteString(noNewlineMarker + "\n")
 			}
 		}

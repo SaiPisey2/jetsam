@@ -126,3 +126,72 @@ func TestUnifiedDiffHunkCountsIgnoreTheMarkerLine(t *testing.T) {
 		t.Errorf("hunk header counts were thrown off by the marker line:\n%s", diff)
 	}
 }
+
+// TestUnifiedDiffAppliesWhenTheLastLineIsReplaced is fix round 3: the
+// existing suite only ever exercised a pure end-of-file APPEND for "new
+// lacks a trailing newline" (case 5 below), never a genuine substitution of
+// the final line. diffLCS's backtrack, combined with the reversal needed to
+// present ops oldest-to-newest, could print a '+' before the '-' it
+// replaces; when the marker landed on that '+' with the '-' still to
+// follow, `patch` refused the result outright ("malformed patch"). Every
+// case here is asserted by actually applying the generated diff with a
+// real `patch` binary and comparing byte-for-byte against the intended
+// result -- not by inspecting the diff text for a plausible-looking shape.
+func TestUnifiedDiffAppliesWhenTheLastLineIsReplaced(t *testing.T) {
+	cases := []struct {
+		name     string
+		old, new string
+	}{
+		{
+			name: "1: final line replaced, new lacks a trailing newline (the reported failure)",
+			old:  "a: 1\nb: 2\n",
+			new:  "a: 1\nb: 3",
+		},
+		{
+			name: "2: final line replaced, both sides lack a trailing newline",
+			old:  "a: 1\nb: 2",
+			new:  "a: 1\nb: 3",
+		},
+		{
+			name: "3: final line replaced, old lacks a trailing newline, new has one",
+			old:  "a: 1\nb: 2",
+			new:  "a: 1\nb: 3\n",
+		},
+		{
+			name: "4: final line replaced, both sides have trailing newlines",
+			old:  "a: 1\nb: 2\n",
+			new:  "a: 1\nb: 3\n",
+		},
+		{
+			name: "5: pure append, new lacks a trailing newline (already worked -- keep it working)",
+			old:  "a\nb\n",
+			new:  "a\nb\nc",
+		},
+		{
+			name: "6: a change in the middle of a file that itself lacks a trailing newline",
+			old:  "x\ny\nz",
+			new:  "x\nY\nz",
+		},
+		{
+			name: "7: a single-line file replaced entirely, no trailing newline either side",
+			old:  "a",
+			new:  "b",
+		},
+		{
+			name: "8: the final line is deleted, and the file that remains lacks a trailing newline",
+			old:  "a\nb\n",
+			new:  "a",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			diff := unifiedDiff("prometheus.yml", tc.old, tc.new)
+			if diff == "" {
+				t.Fatal("unifiedDiff reported no change for a genuine substitution")
+			}
+			if got := applyWithPatch(t, tc.old, diff); got != tc.new {
+				t.Errorf("applying the diff produced %q, want %q\n--- diff ---\n%s", got, tc.new, diff)
+			}
+		})
+	}
+}
