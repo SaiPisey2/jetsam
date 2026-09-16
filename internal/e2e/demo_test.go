@@ -20,12 +20,12 @@ func TestAgainstThePublicDemo(t *testing.T) {
 	defer cancel()
 	cl := promapi.New(demoURL, 60*time.Second)
 
-	counts, err := cl.TSDBStatus(ctx, 5000)
+	status, err := cl.TSDBStatus(ctx, 5000)
 	if err != nil {
 		t.Fatalf("TSDBStatus against the real demo: %v", err)
 	}
-	if len(counts) < 100 {
-		t.Fatalf("got %d metric names, want >=100: the limit parameter is probably not being sent", len(counts))
+	if len(status.Counts) < 100 {
+		t.Fatalf("got %d metric names, want >=100: the limit parameter is probably not being sent", len(status.Counts))
 	}
 
 	rules, err := cl.AlertingAndRecordingRules(ctx)
@@ -36,7 +36,7 @@ func TestAgainstThePublicDemo(t *testing.T) {
 		t.Fatalf("got %d rules, want >=10 from the node-exporter and Prometheus mixins", len(rules))
 	}
 
-	inv := inventory.Build(counts)
+	inv := inventory.Build(status)
 	names := make([]string, 0, len(inv.Metrics))
 	for _, m := range inv.Metrics {
 		names = append(names, m.Name)

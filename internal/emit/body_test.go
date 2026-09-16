@@ -5,11 +5,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SaiPisey2/jetsam/internal/inventory"
 	"github.com/SaiPisey2/jetsam/internal/verdict"
 )
 
 func TestBodyWarnsThatHistoryIsNotRecoverable(t *testing.T) {
-	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, verdict.Result{}, 200, 1000, 0)
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 	// Reverting the commit restores collection but not the history that was
 	// never written. It is the one mistake a reviewer cannot undo, so it
 	// belongs near the top.
@@ -19,14 +20,14 @@ func TestBodyWarnsThatHistoryIsNotRecoverable(t *testing.T) {
 }
 
 func TestBodyOmitsMoneyWithoutARate(t *testing.T) {
-	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, verdict.Result{}, 200, 1000, 0)
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 	if strings.Contains(body, "$") {
 		t.Errorf("body invented a cost with no rate configured:\n%s", body)
 	}
 }
 
 func TestBodyShowsTheArithmeticWhenGivenARate(t *testing.T) {
-	_, body := Body([]Drop{{Metric: "x", Series: 1000, Job: "api"}}, verdict.Result{}, 200, 10000, 0.0008)
+	_, body := Body([]Drop{{Metric: "x", Series: 1000, Job: "api"}}, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 10000}, 0.0008)
 	if !strings.Contains(body, "0.0008") {
 		t.Errorf("body states a cost without the rate it used:\n%s", body)
 	}
@@ -34,7 +35,7 @@ func TestBodyShowsTheArithmeticWhenGivenARate(t *testing.T) {
 
 func TestBodyCountsWhatWasDeclined(t *testing.T) {
 	res := verdict.Result{Blocked: []string{"rule g/Broken: parse query"}}
-	_, body := Body(nil, res, 200, 1000, 0)
+	_, body := Body(nil, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 	if !strings.Contains(body, "Broken") {
 		t.Errorf("body hides what jetsam declined to touch:\n%s", body)
 	}
@@ -62,7 +63,7 @@ func countTableRows(body string) int {
 
 func TestBodyEscapesPipeInMetricName(t *testing.T) {
 	drops := []Drop{{Metric: "bad|metric", Series: 5, Job: "api"}}
-	_, body := Body(drops, verdict.Result{}, 200, 1000, 0)
+	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 
 	// header + separator + exactly one data row for one drop.
 	if got, want := countTableRows(body), 3; got != want {
@@ -78,7 +79,7 @@ func TestBodyEscapesPipeInMetricName(t *testing.T) {
 
 func TestBodyEscapesBacktickInMetricName(t *testing.T) {
 	drops := []Drop{{Metric: "weird`metric", Series: 5, Job: "api"}}
-	_, body := Body(drops, verdict.Result{}, 200, 1000, 0)
+	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 
 	if got, want := countTableRows(body), 3; got != want {
 		t.Errorf("table rows = %d, want %d (a backtick broke the table):\n%s", got, want, body)
@@ -93,7 +94,7 @@ func TestBodyEscapesBacktickInMetricName(t *testing.T) {
 
 func TestBodyRendersANSIEscapeVisibly(t *testing.T) {
 	drops := []Drop{{Metric: "up\x1b[31mFAKE\x1b[0m", Series: 5, Job: "api"}}
-	_, body := Body(drops, verdict.Result{}, 200, 1000, 0)
+	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 
 	if strings.ContainsRune(body, 0x1b) {
 		t.Errorf("raw ESC byte survived into the body:\n%q", body)
@@ -105,7 +106,7 @@ func TestBodyRendersANSIEscapeVisibly(t *testing.T) {
 
 func TestBodyRendersNewlineInMetricNameVisibly(t *testing.T) {
 	drops := []Drop{{Metric: "up\ninjected", Series: 5, Job: "api"}}
-	_, body := Body(drops, verdict.Result{}, 200, 1000, 0)
+	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 
 	if got, want := countTableRows(body), 3; got != want {
 		t.Errorf("table rows = %d, want %d (a raw newline forged a row):\n%s", got, want, body)
@@ -124,7 +125,7 @@ func TestBodyStatesTheGradeADropRestsOn(t *testing.T) {
 	res := verdict.Result{Verdicts: []verdict.Verdict{
 		{Metric: "x", Series: 10, Grade: verdict.GradeUnreferenced, Droppable: true},
 	}}
-	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, 200, 1000, 0)
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 
 	if !strings.Contains(body, "unreferenced") {
 		t.Errorf("body does not state the grade the drop rests on:\n%s", body)
@@ -141,7 +142,7 @@ func TestBodyDoesNotWarnAboutUnreferencedWhenEveryDropIsFullyEvidenced(t *testin
 	res := verdict.Result{Verdicts: []verdict.Verdict{
 		{Metric: "x", Series: 10, Grade: verdict.GradeUnqueried, Droppable: true},
 	}}
-	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, 200, 1000, 0)
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 	if strings.Contains(body, "-include-unreferenced") {
 		t.Errorf("body warns about -include-unreferenced although every drop rests on unqueried grade:\n%s", body)
 	}
@@ -149,7 +150,7 @@ func TestBodyDoesNotWarnAboutUnreferencedWhenEveryDropIsFullyEvidenced(t *testin
 
 func TestBodyEscapesBlockedEntries(t *testing.T) {
 	res := verdict.Result{Blocked: []string{"rule g/Broken\x1b[31m: parse query"}}
-	_, body := Body(nil, res, 200, 1000, 0)
+	_, body := Body(nil, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 	if strings.ContainsRune(body, 0x1b) {
 		t.Errorf("raw ESC byte survived from a blocked entry into the body:\n%q", body)
 	}
@@ -217,7 +218,7 @@ func TestBodyNeutralisesMarkdownAndHTMLInMetricName(t *testing.T) {
 	for i, shape := range mdInjectionShapes {
 		t.Run(subtestName(i, shape), func(t *testing.T) {
 			drops := []Drop{{Metric: shape, Series: 5, Job: "api"}}
-			_, body := Body(drops, verdict.Result{}, 200, 1000, 0)
+			_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 			assertNoLiveMarkupOrHTML(t, shape, body)
 		})
 	}
@@ -227,7 +228,7 @@ func TestBodyNeutralisesMarkdownAndHTMLInJobName(t *testing.T) {
 	for i, shape := range mdInjectionShapes {
 		t.Run(subtestName(i, shape), func(t *testing.T) {
 			drops := []Drop{{Metric: "x", Series: 5, Job: shape}}
-			_, body := Body(drops, verdict.Result{}, 200, 1000, 0)
+			_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 			assertNoLiveMarkupOrHTML(t, shape, body)
 		})
 	}
@@ -238,8 +239,51 @@ func TestBodyNeutralisesMarkdownAndHTMLInBlockedEntries(t *testing.T) {
 		t.Run(subtestName(i, shape), func(t *testing.T) {
 			drops := []Drop{{Metric: "x", Series: 5, Job: "api"}}
 			res := verdict.Result{Blocked: []string{shape}}
-			_, body := Body(drops, res, 200, 1000, 0)
+			_, body := Body(drops, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
 			assertNoLiveMarkupOrHTML(t, shape, body)
 		})
+	}
+}
+
+// TestBodyPercentageUsesTotalSeriesNotASum pins C2 at the body layer: the
+// percentage must be computed against inv.TotalSeries (which callers set
+// from promapi.Status.HeadSeries), not any other number. 10 series out of
+// a TotalSeries of 1000 is 1.0%; if this ever silently changed to divide
+// by something else (e.g. a sum of only the metrics graded) the math
+// here would drift and this test would catch it.
+func TestBodyPercentageUsesTotalSeriesNotASum(t *testing.T) {
+	drops := []Drop{{Metric: "x", Series: 10, Job: "api"}}
+	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	if !strings.Contains(body, "1.0%") {
+		t.Errorf("body does not state the percentage computed against TotalSeries:\n%s", body)
+	}
+}
+
+// TestBodyWarnsWhenTheInventoryWasTruncated pins the PR-body half of C2:
+// a truncated inventory must carry a loud warning block naming the
+// configured limit and the true metric-name count, so a human approving
+// the PR knows the percentage above cannot account for ungraded metrics.
+func TestBodyWarnsWhenTheInventoryWasTruncated(t *testing.T) {
+	drops := []Drop{{Metric: "x", Series: 10, Job: "api"}}
+	inv := inventory.Inventory{TotalSeries: 15777, MetricLimit: 40, NameCount: 1374, Truncated: true}
+	_, body := Body(drops, verdict.Result{}, 200, inv, 0)
+	if !strings.Contains(body, "[!WARNING]") {
+		t.Errorf("body does not carry a warning block at all:\n%s", body)
+	}
+	if !strings.Contains(body, "truncated") {
+		t.Errorf("body does not say the inventory was truncated:\n%s", body)
+	}
+	if !strings.Contains(body, "40") || !strings.Contains(body, "1374") {
+		t.Errorf("body's truncation warning does not name both the limit and the true metric-name count:\n%s", body)
+	}
+}
+
+// TestBodyDoesNotWarnAboutTruncationWhenThereIsNone is the negative case.
+func TestBodyDoesNotWarnAboutTruncationWhenThereIsNone(t *testing.T) {
+	drops := []Drop{{Metric: "x", Series: 10, Job: "api"}}
+	inv := inventory.Inventory{TotalSeries: 1000, Truncated: false}
+	_, body := Body(drops, verdict.Result{}, 200, inv, 0)
+	if strings.Contains(body, "truncated") {
+		t.Errorf("body warns about truncation although the inventory was not truncated:\n%s", body)
 	}
 }

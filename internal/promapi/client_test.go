@@ -26,11 +26,98 @@ func TestTSDBStatusReturnsSeriesCountsByMetric(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TSDBStatus: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d metrics, want 2", len(got))
+	if len(got.Counts) != 2 {
+		t.Fatalf("got %d metrics, want 2", len(got.Counts))
 	}
-	if got["go_gc_duration_seconds"] != 1258 {
-		t.Errorf("go_gc_duration_seconds = %d, want 1258", got["go_gc_duration_seconds"])
+	if got.Counts["go_gc_duration_seconds"] != 1258 {
+		t.Errorf("go_gc_duration_seconds = %d, want 1258", got.Counts["go_gc_duration_seconds"])
+	}
+}
+
+func TestTSDBStatusReturnsHeadSeriesAndNameCountFromTheSameResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{
+			"headStats":{"numSeries":15777},
+			"labelValueCountByLabelName":[{"name":"__name__","value":1374},{"name":"job","value":3}],
+			"seriesCountByMetricName":[{"name":"go_gc_duration_seconds","value":1258}]}}`))
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, 5*time.Second).TSDBStatus(context.Background(), 5000)
+	if err != nil {
+		t.Fatalf("TSDBStatus: %v", err)
+	}
+	if got.HeadSeries != 15777 {
+		t.Errorf("HeadSeries = %d, want 15777 (the response's headStats.numSeries)", got.HeadSeries)
+	}
+	if got.NameCount != 1374 {
+		t.Errorf("NameCount = %d, want 1374 (the __name__ entry, not some other label)", got.NameCount)
+	}
+}
+
+func TestTSDBStatusDetectsTruncationWhenCountsHitTheLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// limit=1 forces the response to look truncated at metric_limit,
+		// mirroring what a real Prometheus does when limit is below its
+		// actual metric-name count: it returns exactly `limit` rows.
+		w.Write([]byte(`{"status":"success","data":{
+			"headStats":{"numSeries":15777},
+			"labelValueCountByLabelName":[{"name":"__name__","value":1374}],
+			"seriesCountByMetricName":[{"name":"go_gc_duration_seconds","value":1258}]}}`))
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, 5*time.Second).TSDBStatus(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("TSDBStatus: %v", err)
+	}
+	if !got.Truncated {
+		t.Error("Truncated = false, want true: len(Counts) == limit means more metrics may exist")
+	}
+}
+
+func TestTSDBStatusDetectsTruncationWhenNameCountExceedsCounts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{
+			"headStats":{"numSeries":15777},
+			"labelValueCountByLabelName":[{"name":"__name__","value":1374}],
+			"seriesCountByMetricName":[{"name":"go_gc_duration_seconds","value":1258}]}}`))
+	}))
+	defer srv.Close()
+
+	// limit=5000 is well above len(Counts) == 1, so the len(Counts)>=limit
+	// signal alone would miss this; NameCount (1374) exceeding len(Counts)
+	// (1) must catch it independently.
+	got, err := New(srv.URL, 5*time.Second).TSDBStatus(context.Background(), 5000)
+	if err != nil {
+		t.Fatalf("TSDBStatus: %v", err)
+	}
+	if !got.Truncated {
+		t.Error("Truncated = false, want true: NameCount exceeds len(Counts)")
+	}
+}
+
+func TestTSDBStatusNotTruncatedWhenCountsCoverEveryName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{
+			"headStats":{"numSeries":2088},
+			"labelValueCountByLabelName":[{"name":"__name__","value":2}],
+			"seriesCountByMetricName":[
+				{"name":"go_gc_duration_seconds","value":1258},
+				{"name":"node_systemd_unit_state","value":830}]}}`))
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, 5*time.Second).TSDBStatus(context.Background(), 5000)
+	if err != nil {
+		t.Fatalf("TSDBStatus: %v", err)
+	}
+	if got.Truncated {
+		t.Error("Truncated = true, want false: Counts already covers every metric name")
 	}
 }
 

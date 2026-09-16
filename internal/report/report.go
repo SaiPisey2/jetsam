@@ -15,6 +15,11 @@ import (
 // Scan writes the scan report: a header, then every metric graded, largest
 // first.
 func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Result) {
+	if inv.Truncated {
+		fmt.Fprintf(w, "WARNING: inventory truncated at metric_limit=%d of %d metric names; "+
+			"metrics outside the top %d by series count were not graded. Raise prometheus.metric_limit "+
+			"in your config to see them.\n\n", inv.MetricLimit, inv.NameCount, inv.MetricLimit)
+	}
 	fmt.Fprintf(w, "Metrics    %d\n", len(inv.Metrics))
 	fmt.Fprintf(w, "Series     %d\n", inv.TotalSeries)
 	fmt.Fprintf(w, "Queries    %d read from rules\n", c.Queries)

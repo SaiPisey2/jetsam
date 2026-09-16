@@ -84,7 +84,7 @@ func runScan(args []string) {
 	defer cancel()
 
 	cl := promapi.New(cfg.Prometheus.URL, cfg.Prometheus.Timeout)
-	counts, err := cl.TSDBStatus(ctx, cfg.Prometheus.MetricLimit)
+	status, err := cl.TSDBStatus(ctx, cfg.Prometheus.MetricLimit)
 	if err != nil {
 		fail(err)
 	}
@@ -93,7 +93,7 @@ func runScan(args []string) {
 		fail(err)
 	}
 
-	inv := inventory.Build(counts)
+	inv := inventory.Build(status)
 	names := make([]string, 0, len(inv.Metrics))
 	for _, m := range inv.Metrics {
 		names = append(names, m.Name)
@@ -194,7 +194,7 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	defer cancel()
 
 	cl := promapi.New(cfg.Prometheus.URL, cfg.Prometheus.Timeout)
-	counts, err := cl.TSDBStatus(ctx, cfg.Prometheus.MetricLimit)
+	status, err := cl.TSDBStatus(ctx, cfg.Prometheus.MetricLimit)
 	if err != nil {
 		logErr(err)
 		return 1
@@ -205,7 +205,7 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 		return 1
 	}
 
-	inv := inventory.Build(counts)
+	inv := inventory.Build(status)
 	names := make([]string, 0, len(inv.Metrics))
 	for _, m := range inv.Metrics {
 		names = append(names, m.Name)
@@ -377,7 +377,7 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	// not "how many metrics were dropped".
 	bodyRes := res
 	bodyRes.Blocked = append(append([]string(nil), res.Blocked...), declined...)
-	title, body := emit.Body(drops, bodyRes, cor.Queries, inv.TotalSeries, cfg.Pricing.PerSeriesMonth)
+	title, body := emit.Body(drops, bodyRes, cor.Queries, inv, cfg.Pricing.PerSeriesMonth)
 	fmt.Fprintf(stdout, "%s\n\n%s\n\n", title, body)
 
 	if !*apply {

@@ -5,10 +5,14 @@ import (
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
+	"github.com/SaiPisey2/jetsam/internal/promapi"
 )
 
 func fixture() (inventory.Inventory, corpus.Corpus) {
-	inv := inventory.Build(map[string]int{"used_metric": 100, "unread_metric": 400, "job:rec": 5})
+	inv := inventory.Build(promapi.Status{
+		Counts:     map[string]int{"used_metric": 100, "unread_metric": 400, "job:rec": 5},
+		HeadSeries: 505,
+	})
 	c := corpus.Corpus{
 		Queries:  3,
 		Used:     map[string]bool{"used_metric": true},

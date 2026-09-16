@@ -120,24 +120,75 @@ type nameValue struct {
 	Value int    `json:"value"`
 }
 
-// TSDBStatus returns every metric name with its series count.
+// Status is what /api/v1/status/tsdb reports, decoded into the shape the
+// rest of jetsam needs. Counts is bounded by the limit passed to
+// TSDBStatus; HeadSeries and NameCount are not -- they come from
+// headStats.numSeries and the labelValueCountByLabelName entry for
+// "__name__", both of which describe the WHOLE Prometheus regardless of
+// how many entries Counts holds. A caller computing "how many series does
+// this Prometheus store" by summing Counts is answering that question
+// wrong the moment the metric list is truncated; HeadSeries is the
+// number that is actually true.
+type Status struct {
+	// Counts is metric name -> series count, at most `limit` entries.
+	Counts map[string]int
+	// Limit is the limit this call was made with, carried through so a
+	// caller can report "truncated at metric_limit=N" without threading
+	// the config value through separately.
+	Limit int
+	// HeadSeries is headStats.numSeries: the true total number of series
+	// this Prometheus holds right now, independent of limit.
+	HeadSeries int
+	// NameCount is the true number of distinct metric names this
+	// Prometheus holds, independent of limit -- the labelValueCountByLabelName
+	// entry for "__name__".
+	NameCount int
+	// Truncated is true when Counts does not cover every metric name:
+	// either the call returned exactly `limit` entries (there may be more
+	// Prometheus never sent), or NameCount exceeds len(Counts) outright.
+	// A caller must not treat Counts as exhaustive when this is true.
+	Truncated bool
+}
+
+// TSDBStatus returns every metric name with its series count, plus the
+// head-level totals needed to tell whether that per-metric list was
+// truncated.
 //
 // limit matters: without it the endpoint returns only the top ten entries,
 // which would make every metric outside the top ten look like it does not
-// exist. Pass a limit above the instance's distinct metric-name count.
-func (c *Client) TSDBStatus(ctx context.Context, limit int) (map[string]int, error) {
+// exist. Pass a limit above the instance's distinct metric-name count --
+// but do not assume it always is: Status.Truncated says whether it wasn't.
+func (c *Client) TSDBStatus(ctx context.Context, limit int) (Status, error) {
 	var data struct {
-		SeriesCountByMetricName []nameValue `json:"seriesCountByMetricName"`
+		HeadStats struct {
+			NumSeries int `json:"numSeries"`
+		} `json:"headStats"`
+		LabelValueCountByLabelName []nameValue `json:"labelValueCountByLabelName"`
+		SeriesCountByMetricName    []nameValue `json:"seriesCountByMetricName"`
 	}
 	q := url.Values{"limit": []string{strconv.Itoa(limit)}}
 	if err := c.get(ctx, "/api/v1/status/tsdb", q, &data); err != nil {
-		return nil, err
+		return Status{}, err
 	}
 	out := make(map[string]int, len(data.SeriesCountByMetricName))
 	for _, nv := range data.SeriesCountByMetricName {
 		out[nv.Name] = nv.Value
 	}
-	return out, nil
+	nameCount := 0
+	for _, nv := range data.LabelValueCountByLabelName {
+		if nv.Name == "__name__" {
+			nameCount = nv.Value
+			break
+		}
+	}
+	truncated := len(out) >= limit || nameCount > len(out)
+	return Status{
+		Counts:     out,
+		Limit:      limit,
+		HeadSeries: data.HeadStats.NumSeries,
+		NameCount:  nameCount,
+		Truncated:  truncated,
+	}, nil
 }
 
 // Rule is one alerting or recording rule as Prometheus reports it.

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/SaiPisey2/jetsam/internal/inventory"
 	"github.com/SaiPisey2/jetsam/internal/safe"
 	"github.com/SaiPisey2/jetsam/internal/verdict"
 )
@@ -85,7 +86,13 @@ func mdText(s string) string {
 // covered the window too) carry very different confidence, and a drop
 // proposed on the weaker grade needs a warning of its own, alongside -- not
 // instead of -- the irreversibility one.
-func Body(drops []Drop, res verdict.Result, queries, totalSeries int, perSeriesMonth float64) (string, string) {
+//
+// inv, not a bare total, so this function can warn when the inventory
+// itself was truncated by metric_limit: inv.TotalSeries is the Prometheus's
+// true series count (see inventory.Inventory.TotalSeries), and the
+// percentage below is stated against that, never against a sum of only the
+// metrics metric_limit happened to return.
+func Body(drops []Drop, res verdict.Result, queries int, inv inventory.Inventory, perSeriesMonth float64) (string, string) {
 	total := 0
 	for _, d := range drops {
 		total += d.Series
@@ -123,8 +130,16 @@ func Body(drops []Drop, res verdict.Result, queries, totalSeries int, perSeriesM
 			"who ran it has chosen to accept that risk.\n\n", len(unreferenced))
 	}
 
-	if total > 0 && totalSeries > 0 {
-		fmt.Fprintf(&b, "Drops %d series -- %.1f%% of what this Prometheus stores.\n", total, 100*float64(total)/float64(totalSeries))
+	if inv.Truncated {
+		fmt.Fprintf(&b, "> [!WARNING]\n> **This inventory was truncated at metric_limit=%d of %d metric names.** "+
+			"Metrics outside the top %d by series count were not graded and could not be proposed for dropping. "+
+			"The percentage below understates what this Prometheus actually stores only in the sense that it "+
+			"cannot account for those ungraded metrics at all; raise `prometheus.metric_limit` to see them.\n\n",
+			inv.MetricLimit, inv.NameCount, inv.MetricLimit)
+	}
+
+	if total > 0 && inv.TotalSeries > 0 {
+		fmt.Fprintf(&b, "Drops %d series -- %.1f%% of what this Prometheus stores.\n", total, 100*float64(total)/float64(inv.TotalSeries))
 		if perSeriesMonth > 0 {
 			// State the arithmetic, not just the answer: the configured
 			// rate and the multiplication, so a reader can check it rather
