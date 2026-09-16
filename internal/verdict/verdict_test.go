@@ -1,6 +1,7 @@
 package verdict
 
 import (
+	"math"
 	"testing"
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
@@ -73,6 +74,28 @@ func TestARecordingRuleOutputIsNeverDroppable(t *testing.T) {
 		if v.Metric == "job:rec" && v.Droppable {
 			t.Error("job:rec: Droppable = true — dropping a recording rule's output needs a rule-file edit, not a scrape-config one")
 		}
+	}
+}
+
+// TestDroppableSeriesClampsRatherThanOverflowsNegative pins F3: two
+// droppable metrics with math.MaxInt-1 series each sum to more than
+// math.MaxInt can represent. Plain int addition wraps that into a
+// negative DroppableSeries; saturating addition clamps to math.MaxInt
+// instead -- still wrong, but visibly so rather than silently negative.
+func TestDroppableSeriesClampsRatherThanOverflowsNegative(t *testing.T) {
+	huge := math.MaxInt - 1
+	inv := inventory.Build(promapi.Status{
+		Counts:     map[string]int{"a": huge, "b": huge},
+		HeadSeries: huge,
+	})
+	c := corpus.Corpus{Queries: 1}
+	got := Compute(inv, c, true)
+
+	if got.DroppableSeries < 0 {
+		t.Fatalf("DroppableSeries went negative on overflow: %d", got.DroppableSeries)
+	}
+	if got.DroppableSeries != math.MaxInt {
+		t.Errorf("DroppableSeries = %d, want it clamped to math.MaxInt (%d)", got.DroppableSeries, math.MaxInt)
 	}
 }
 

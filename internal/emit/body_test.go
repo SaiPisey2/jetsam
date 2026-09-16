@@ -2,12 +2,37 @@ package emit
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
 	"github.com/SaiPisey2/jetsam/internal/inventory"
 	"github.com/SaiPisey2/jetsam/internal/verdict"
 )
+
+// TestBodyTotalClampsRatherThanOverflowsNegative pins C3/F3: two drops of
+// math.MaxInt-1 series each sum to more than math.MaxInt can represent.
+// Plain int addition wraps that into a negative number -- the auditor's
+// concrete repro produced the PR title "## jetsam: -4 series nothing
+// reads" -- which is silently wrong in the one number this tool asks a
+// human to trust before deleting data. Saturating addition clamps to
+// math.MaxInt instead: still wrong (it understates the true sum) but
+// visibly, absurdly wrong rather than silently negative.
+func TestBodyTotalClampsRatherThanOverflowsNegative(t *testing.T) {
+	huge := math.MaxInt - 1
+	drops := []Drop{
+		{Metric: "a", Series: huge, Job: "api"},
+		{Metric: "b", Series: huge, Job: "api"},
+	}
+	title, _ := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1}, 0)
+	if strings.Contains(title, "-") {
+		t.Errorf("title went negative on overflow: %q", title)
+	}
+	want := fmt.Sprintf("%d", math.MaxInt)
+	if !strings.Contains(title, want) {
+		t.Errorf("title = %q, want it to contain the clamped total %s", title, want)
+	}
+}
 
 func TestBodyWarnsThatHistoryIsNotRecoverable(t *testing.T) {
 	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)

@@ -3,9 +3,28 @@
 package verdict
 
 import (
+	"math"
+
 	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
 )
+
+// addSeriesSaturating adds b to a, clamping to math.MaxInt instead of
+// wrapping into a negative number when the true sum overflows. Series
+// counts are validated non-negative where they enter jetsam (see
+// promapi.Client.TSDBStatus), so the only way this overflows is a hostile
+// or compromised Prometheus reporting enough individually-plausible counts
+// that their sum is not representable. A clamped total is still wrong --
+// it understates the true sum -- but it is visibly, absurdly wrong (an
+// implausible number of series) rather than silently wrong (a negative
+// count of series a human is being asked to approve deleting).
+func addSeriesSaturating(a, b int) int {
+	sum := a + b
+	if b > 0 && sum < a {
+		return math.MaxInt
+	}
+	return sum
+}
 
 // Grade is how strong the evidence behind a verdict is. It is an axis of
 // its own, deliberately separate from whether a metric is read: the same
@@ -71,7 +90,7 @@ func Compute(inv inventory.Inventory, c corpus.Corpus, haveQueryLog bool) Result
 			v.Reason = "blocked: a query could not be read"
 		}
 		if v.Droppable {
-			res.DroppableSeries += m.Series
+			res.DroppableSeries = addSeriesSaturating(res.DroppableSeries, m.Series)
 		}
 		res.Verdicts = append(res.Verdicts, v)
 	}

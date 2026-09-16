@@ -318,3 +318,47 @@ func TestGetRejectsAnOversizedBodyRatherThanTruncating(t *testing.T) {
 		t.Errorf("error does not report the size limit was exceeded: %v", err)
 	}
 }
+
+// TestTSDBStatusRejectsANegativeSeriesCount: a series count cannot be
+// negative. A hostile or compromised Prometheus sending one corrupts every
+// number derived from it downstream -- the PR title's total, the
+// percentage of the instance a drop represents -- so it must be rejected
+// at this boundary rather than silently accepted and propagated.
+func TestTSDBStatusRejectsANegativeSeriesCount(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{"seriesCountByMetricName":[
+			{"name":"go_gc_duration_seconds","value":-5}]}}`))
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, 5*time.Second).TSDBStatus(context.Background(), 500)
+	if err == nil {
+		t.Fatal("TSDBStatus succeeded with a negative series count, want an error")
+	}
+	if !strings.Contains(err.Error(), "negative") {
+		t.Errorf("error does not say the series count is negative: %v", err)
+	}
+}
+
+// TestTSDBStatusRejectsANegativeHeadSeries mirrors the above for
+// headStats.numSeries, the true Prometheus-wide total that
+// Inventory.TotalSeries and every percentage computed against it depend
+// on.
+func TestTSDBStatusRejectsANegativeHeadSeries(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{
+			"headStats":{"numSeries":-1},
+			"seriesCountByMetricName":[]}}`))
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, 5*time.Second).TSDBStatus(context.Background(), 500)
+	if err == nil {
+		t.Fatal("TSDBStatus succeeded with a negative headStats.numSeries, want an error")
+	}
+	if !strings.Contains(err.Error(), "negative") {
+		t.Errorf("error does not say the head series count is negative: %v", err)
+	}
+}

@@ -170,13 +170,29 @@ func (c *Client) TSDBStatus(ctx context.Context, limit int) (Status, error) {
 	if err := c.get(ctx, "/api/v1/status/tsdb", q, &data); err != nil {
 		return Status{}, err
 	}
+	// A series count cannot be negative. This is validated at the
+	// boundary, not downstream, because a negative count corrupts every
+	// number derived from it -- the PR title's total, the percentage of
+	// the Prometheus this drops -- and by the time it reaches emit or
+	// verdict there is no way to tell "hostile/broken server" apart from
+	// "legitimate but tiny". A server sending one is either broken or
+	// hostile (a compromised or MITM'd Prometheus), so reject it here.
+	if data.HeadStats.NumSeries < 0 {
+		return Status{}, fmt.Errorf("tsdb status: headStats.numSeries is negative (%d)", data.HeadStats.NumSeries)
+	}
 	out := make(map[string]int, len(data.SeriesCountByMetricName))
 	for _, nv := range data.SeriesCountByMetricName {
+		if nv.Value < 0 {
+			return Status{}, fmt.Errorf("tsdb status: metric %q has a negative series count (%d)", nv.Name, nv.Value)
+		}
 		out[nv.Name] = nv.Value
 	}
 	nameCount := 0
 	for _, nv := range data.LabelValueCountByLabelName {
 		if nv.Name == "__name__" {
+			if nv.Value < 0 {
+				return Status{}, fmt.Errorf("tsdb status: __name__ label-value count is negative (%d)", nv.Value)
+			}
 			nameCount = nv.Value
 			break
 		}
