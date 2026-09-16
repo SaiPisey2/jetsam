@@ -245,6 +245,112 @@ func TestBodyNeutralisesMarkdownAndHTMLInBlockedEntries(t *testing.T) {
 	}
 }
 
+// --- GFM extended autolink: unlike the delimiter-based injections above,
+// these payloads carry no "[", "(", "<" or any other Markdown/HTML
+// delimiter at all. GitHub Flavored Markdown's extended autolink extension
+// turns bare "www.", "http://", "https://" and email-shaped text into live
+// links purely from their own characters, so a job label or a UTF-8 metric
+// name that merely contains a "." or an "@" is enough to render as a
+// clickable link or a mailto: in this approval surface, with no other
+// escaping defeating it.
+
+// autolinkShapes are the concrete payloads confirmed to render as live
+// <a href=...> links against a real GFM renderer (goldmark with
+// extension.GFM) before this fix.
+var autolinkShapes = []string{
+	"www.evil.example/steal",
+	"http://evil.example/steal",
+	"https://evil.example/steal",
+	"visit www.evil.example now",
+	"contact me@evil.example",
+}
+
+// assertAutolinkDefeated checks the rendered body against exactly what
+// mdText is supposed to have done to shape: the escaped form must be
+// present, the raw unescaped payload must not be (that raw form is what a
+// GFM extended-autolink scanner anchors on -- a literal "." for the
+// www/http(s) domain parser, a literal "@" for the email autolink -- since
+// neither survives mdText), and no rendered-link markup ("<a ", "href=")
+// must appear regardless. Comparing against mdText(shape) rather than a
+// hardcoded string keeps this test anchored to the function under test: it
+// fails before the fix (mdText left "." and "@" untouched, so the "raw
+// payload absent" check trips) and passes after it.
+func assertAutolinkDefeated(t *testing.T, shape, body string) {
+	t.Helper()
+	want := mdText(shape)
+	if !strings.Contains(body, want) {
+		t.Errorf("shape %q: body does not contain the escaped form %q:\n%s", shape, want, body)
+	}
+	if strings.Contains(body, shape) {
+		t.Errorf("shape %q: body contains the raw, unescaped payload -- a GFM renderer would autolink it:\n%s", shape, body)
+	}
+	for _, bad := range []string{"<a ", "href="} {
+		if strings.Contains(body, bad) {
+			t.Errorf("shape %q: body contains rendered-link markup %q:\n%s", shape, bad, body)
+		}
+	}
+}
+
+func TestBodyDefeatsAutolinkInMetricName(t *testing.T) {
+	for i, shape := range autolinkShapes {
+		t.Run(subtestName(i, shape), func(t *testing.T) {
+			drops := []Drop{{Metric: shape, Series: 5, Job: "api"}}
+			_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+			assertAutolinkDefeated(t, shape, body)
+		})
+	}
+}
+
+func TestBodyDefeatsAutolinkInJobName(t *testing.T) {
+	for i, shape := range autolinkShapes {
+		t.Run(subtestName(i, shape), func(t *testing.T) {
+			drops := []Drop{{Metric: "x", Series: 5, Job: shape}}
+			_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+			assertAutolinkDefeated(t, shape, body)
+		})
+	}
+}
+
+func TestBodyDefeatsAutolinkInBlockedEntries(t *testing.T) {
+	for i, shape := range autolinkShapes {
+		t.Run(subtestName(i, shape), func(t *testing.T) {
+			drops := []Drop{{Metric: "x", Series: 5, Job: "api"}}
+			res := verdict.Result{Blocked: []string{shape}}
+			_, body := Body(drops, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+			assertAutolinkDefeated(t, shape, body)
+		})
+	}
+}
+
+// TestBodyLeavesOrdinaryNamesReadable pins the other side of the F1 fix:
+// escaping "." and "@" must not mangle names that were never an attack.
+// node_cpu_seconds_total and "up" contain neither character and must
+// round-trip untouched; a UTF-8 name (the Prometheus UTF-8 metric-naming
+// scheme allows arbitrary characters, including "." and non-ASCII letters)
+// must still be readable after entity-escaping -- "café.total" becomes
+// "café&#46;total", which a human reads as "café.total" and no renderer
+// autolinks.
+func TestBodyLeavesOrdinaryNamesReadable(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{"node_cpu_seconds_total", "node_cpu_seconds_total"},
+		{"up", "up"},
+		{"café.total", "café&#46;total"},
+	}
+	for _, tc := range cases {
+		drops := []Drop{{Metric: tc.name, Series: 5, Job: "api"}}
+		_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+		if !strings.Contains(body, tc.want) {
+			t.Errorf("ordinary metric name %q: body does not contain %q:\n%s", tc.name, tc.want, body)
+		}
+		if strings.Contains(body, "www.") || strings.Contains(body, "@evil") {
+			t.Errorf("ordinary metric name %q: body unexpectedly contains autolinkable text:\n%s", tc.name, body)
+		}
+	}
+}
+
 // TestBodyPercentageUsesTotalSeriesNotASum pins C2 at the body layer: the
 // percentage must be computed against inv.TotalSeries (which callers set
 // from promapi.Status.HeadSeries), not any other number. 10 series out of

@@ -52,14 +52,39 @@ import (
 //     depend on that at all; it is inert text at the point angle brackets
 //     would otherwise start being read as a tag; that holds regardless of
 //     what parses this Markdown next.
+//   - "." and "@" are rendered as the HTML entities "&#46;"/"&#64;". None
+//     of the delimiter escaping above stops GitHub Flavored Markdown's
+//     *extended autolink*, which needs no delimiters at all: bare
+//     "www.evil.example", "http://evil.example" and "me@evil.example"
+//     become live links purely from their own characters. A remote-sourced
+//     job label or (on a Prometheus using the UTF-8 metric-naming scheme)
+//     metric name is exactly the kind of free-form string that can spell
+//     one of these out, turning this approval surface into a phishing
+//     link or a mailto: a reviewer can click without ever deciding to.
+//     Entity references, like the "<"/"&gt;" ones above, render as the
+//     original character but leave no literal "." or "@" for the autolink
+//     scanner to anchor on.
 //
 // Order matters throughout: backslashes are escaped first, so a backslash
 // already escaping one of these characters can never be produced by this
 // function's own escaping and then re-interpreted as escaping something
-// else.
+// else. "&" is escaped immediately after, and before every entity this
+// function introduces ("&lt;", "&gt;", "&#46;", "&#64;"): escaping it
+// first, rather than not touching it at all, closes two problems with one
+// rule. First, it stops this function's own output from being
+// double-escaped -- if "&" escaping ran after the "<"/"." replacements
+// below, "&lt;" would become "&amp;lt;", which renders as the literal
+// text "&lt;" instead of "<". Second, it stops a remote string from
+// smuggling a literal "." or "@" past the checks below by spelling out
+// its own entity: an input already containing the literal text "&#46;"
+// would, left untouched, still decode to "." in a Markdown/HTML renderer
+// even though this function never wrote a "." itself. Escaping any
+// pre-existing "&" to "&amp;" first makes that sequence render as the
+// inert text "&#46;", not a decoded period.
 func mdText(s string) string {
 	s = safe.Text(s)
 	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "|", `\|`)
 	s = strings.ReplaceAll(s, "`", "\\`")
 	s = strings.ReplaceAll(s, "[", `\[`)
@@ -69,6 +94,8 @@ func mdText(s string) string {
 	s = strings.ReplaceAll(s, "!", `\!`)
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, ".", "&#46;")
+	s = strings.ReplaceAll(s, "@", "&#64;")
 	return s
 }
 
