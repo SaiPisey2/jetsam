@@ -52,3 +52,44 @@ func TestExtractRejectsAnUnparseableQuery(t *testing.T) {
 		t.Fatal("Extract succeeded on a template-variable query, want an error")
 	}
 }
+
+// TestExtractReturnsNoRefsAlongsideAnError pins the other half of Extract's
+// error contract: not just that an unparseable query returns an error, but
+// that it returns a completely empty Refs alongside it. Callers rely on
+// this: corpus.Build's Blocked path skips a failed rule with `continue`,
+// but even if that guard were ever removed, only the zero value here keeps
+// a blocked rule from silently contributing reads -- a populated Refs
+// (Names, NameMatchers, or MatchesEverything) returned alongside an error
+// would let a rule jetsam could not read mark metrics used regardless of
+// what the caller does with the error. This must be pinned here, where the
+// contract is made, rather than left as an untested accident that
+// corpus.Build merely happens to depend on.
+func TestExtractReturnsNoRefsAlongsideAnError(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"grafana template variable", `rate(http_requests_total[$__rate_interval])`},
+		{"empty string", ``},
+		{"truncated expression", `sum(`},
+		{"unterminated selector", `http_requests_total{`},
+		{"no non-empty matcher", `{__name__!="foo"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			refs, err := Extract(tc.query)
+			if err == nil {
+				t.Fatalf("Extract(%q) succeeded, want an error", tc.query)
+			}
+			if len(refs.Names) != 0 {
+				t.Errorf("Names = %v, want empty alongside an error", refs.Names)
+			}
+			if len(refs.NameMatchers) != 0 {
+				t.Errorf("NameMatchers = %v, want empty alongside an error", refs.NameMatchers)
+			}
+			if refs.MatchesEverything {
+				t.Error("MatchesEverything = true, want false alongside an error")
+			}
+		})
+	}
+}
