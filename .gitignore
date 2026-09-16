@@ -1,0 +1,19 @@
+# local docs and planning
+docs/
+.superpowers/
+CLAUDE.md
+AGENTS.md
+.claude/
+
+# build output
+/jetsam
+/dist/
+*.exe
+
+# local state
+.env
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
