@@ -138,9 +138,37 @@ func mdText(s string) string {
 // percentage below is stated against that, never against a sum of only the
 // metrics metric_limit happened to return.
 func Body(drops []Drop, res verdict.Result, queries int, inv inventory.Inventory, perSeriesMonth float64) (string, string) {
-	total := 0
+	// The headline total counts each METRIC once, not each Drop once. A
+	// metric produced by several jobs (a shared exporter scraped under
+	// more than one job label, most commonly) gets one emit.Drop per job
+	// it is dropped from, each carrying that metric's FULL series count
+	// from the inventory -- cmd/jetsam does this deliberately, because a
+	// relabel rule genuinely is added to every one of those jobs. Summing
+	// Series across every Drop would then count that metric's series once
+	// per job it happens to be produced by, which is how a real run
+	// against the public demo reported dropping more series than the
+	// instance held: a percentage over 100%. That number is the one this
+	// whole tool asks a human to trust before approving an irreversible
+	// deletion, so it must never be able to say something that cannot be
+	// true. multiJobMetrics counts how many metrics this happened for, so
+	// the per-job tables below can say plainly that they list a shared
+	// metric more than once while the total above does not.
+	dropCount := map[string]int{}
 	for _, d := range drops {
+		dropCount[d.Metric]++
+	}
+	seenMetric := map[string]bool{}
+	total := 0
+	multiJobMetrics := 0
+	for _, d := range drops {
+		if seenMetric[d.Metric] {
+			continue
+		}
+		seenMetric[d.Metric] = true
 		total = addSeriesSaturating(total, d.Series)
+		if dropCount[d.Metric] > 1 {
+			multiJobMetrics++
+		}
 	}
 	title := fmt.Sprintf("jetsam: stop storing %d unread series", total)
 
@@ -193,6 +221,18 @@ func Body(drops []Drop, res verdict.Result, queries int, inv inventory.Inventory
 				perSeriesMonth, total, perSeriesMonth, float64(total)*perSeriesMonth)
 		}
 		b.WriteString("\n")
+	}
+
+	if multiJobMetrics > 0 {
+		// Chose to keep the per-row series count in the tables below,
+		// rather than omit it for a shared metric: it is the same real
+		// number either way (this metric's series count, from the
+		// inventory), and a relabel rule genuinely is being added to every
+		// job listed, which is worth stating plainly. What must not happen
+		// is a reader adding the rows up and reasonably expecting to reach
+		// the headline total -- so say outright that they won't.
+		fmt.Fprintf(&b, "%d metric(s) below are produced by more than one job and are listed once under "+
+			"each -- the totals above count each metric once, not once per job.\n\n", multiJobMetrics)
 	}
 
 	byJob := map[string][]Drop{}

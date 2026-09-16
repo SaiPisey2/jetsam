@@ -418,3 +418,138 @@ func TestBodyDoesNotWarnAboutTruncationWhenThereIsNone(t *testing.T) {
 		t.Errorf("body warns about truncation although the inventory was not truncated:\n%s", body)
 	}
 }
+
+// --- A metric produced by more than one job gets one emit.Drop per job it
+// is dropped from (cmd/jetsam does this deliberately: a relabel rule
+// genuinely is added to each of those jobs), and every one of those Drops
+// carries that metric's FULL series count from the inventory. Summing
+// Series across every Drop therefore counts a shared metric's series once
+// per job producing it -- which is how a real run against the public demo
+// reported a drops-percentage over 100%: it proposed dropping more series
+// than the instance held. The headline total, and the percentage derived
+// from it, must count each metric once no matter how many jobs it is
+// dropped from.
+
+// TestBodyTotalCountsASharedMetricOnce pins the fix directly: two Drops
+// naming the SAME metric under two different jobs, 100 series each, must
+// total 100 -- not 200 -- and the stated percentage must match that 100,
+// not a doubled figure.
+func TestBodyTotalCountsASharedMetricOnce(t *testing.T) {
+	drops := []Drop{
+		{Metric: "shared_metric", Series: 100, Job: "api"},
+		{Metric: "shared_metric", Series: 100, Job: "batch"},
+	}
+	title, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	if !strings.Contains(title, "100 unread series") {
+		t.Errorf("title = %q, want it to count shared_metric once (100), not once per job (200)", title)
+	}
+	if !strings.Contains(body, "Drops 100 series -- 10.0%") {
+		t.Errorf("body does not state the deduplicated total and matching percentage:\n%s", body)
+	}
+	if strings.Contains(body, "200 series") || strings.Contains(body, "20.0%") {
+		t.Errorf("body contains the doubled, undeduplicated total or its percentage:\n%s", body)
+	}
+}
+
+// TestBodyTotalDoesNotCollapseDistinctMetrics is the negative case: two
+// Drops naming DIFFERENT metrics, 100 series each, must still sum to 200.
+// Deduplication is keyed on metric name, not series count or position, and
+// must never merge genuinely distinct metrics into one.
+func TestBodyTotalDoesNotCollapseDistinctMetrics(t *testing.T) {
+	drops := []Drop{
+		{Metric: "metric_a", Series: 100, Job: "api"},
+		{Metric: "metric_b", Series: 100, Job: "api"},
+	}
+	title, _ := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	if !strings.Contains(title, "200 unread series") {
+		t.Errorf("title = %q, want 200 (two distinct metrics must not be collapsed)", title)
+	}
+}
+
+// TestBodyTotalCountsAMixOfSharedAndSingleJobMetricsOnce combines both: one
+// metric dropped from three jobs (100 series) plus two metrics dropped
+// from a single job each (50 and 25 series). The total must be
+// 100+50+25=175, counting the three-job metric exactly once, not 100*3+50+25.
+func TestBodyTotalCountsAMixOfSharedAndSingleJobMetricsOnce(t *testing.T) {
+	drops := []Drop{
+		{Metric: "shared", Series: 100, Job: "a"},
+		{Metric: "shared", Series: 100, Job: "b"},
+		{Metric: "shared", Series: 100, Job: "c"},
+		{Metric: "solo_1", Series: 50, Job: "a"},
+		{Metric: "solo_2", Series: 25, Job: "b"},
+	}
+	title, _ := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	if !strings.Contains(title, "175 unread series") {
+		t.Errorf("title = %q, want 175 (100 once + 50 + 25)", title)
+	}
+}
+
+// TestBodyPercentageNeverExceedsOneHundred pins the property the auditor's
+// real repro violated directly: when inv.TotalSeries is the true head
+// series count, the stated percentage of a proposal that drops a subset of
+// this Prometheus's own metrics can never read over 100%. A drop
+// proposal, by construction, can only name metrics this Prometheus
+// actually holds today; a total exceeding TotalSeries is proof the total
+// double-counted something, not evidence this Prometheus undercounted
+// itself.
+func TestBodyPercentageNeverExceedsOneHundred(t *testing.T) {
+	drops := []Drop{
+		{Metric: "shared", Series: 6000, Job: "a"},
+		{Metric: "shared", Series: 6000, Job: "b"},
+		{Metric: "shared", Series: 6000, Job: "c"},
+		{Metric: "shared", Series: 6000, Job: "d"},
+	}
+	// TotalSeries is the true head count this metric's 6000 series are
+	// already counted within -- not 4x that, which is what an undeduplicated
+	// sum across four jobs would need to stay under 100%.
+	inv := inventory.Inventory{TotalSeries: 6500}
+	_, body := Body(drops, verdict.Result{}, 200, inv, 0)
+
+	idx := strings.Index(body, "Drops ")
+	if idx < 0 {
+		t.Fatalf("body does not state a drops percentage at all:\n%s", body)
+	}
+	line := body[idx:]
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	var series int
+	var pct float64
+	if _, err := fmt.Sscanf(line, "Drops %d series -- %f%%", &series, &pct); err != nil {
+		t.Fatalf("could not parse the drops line %q: %v", line, err)
+	}
+	if pct > 100 {
+		t.Errorf("percentage = %.1f%%, want <= 100%% (a real drop proposal cannot exceed what this Prometheus holds):\n%s", pct, body)
+	}
+}
+
+// TestBodyListsASharedMetricUnderEveryJob pins the other half of the
+// chosen fix: the per-job tables are unaffected by deduplication. A
+// relabel rule genuinely is added to every job a shared metric is dropped
+// from, so it must still appear as a row under each job's table, series
+// count and all -- only the headline total and percentage are
+// deduplicated. The body must also say plainly, near the tables, that a
+// shared metric is listed once per job while the total above counts it
+// once.
+func TestBodyListsASharedMetricUnderEveryJob(t *testing.T) {
+	drops := []Drop{
+		{Metric: "shared_metric", Series: 100, Job: "api"},
+		{Metric: "shared_metric", Series: 100, Job: "batch"},
+	}
+	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+
+	if !strings.Contains(body, "### job \"api\"") || !strings.Contains(body, "### job \"batch\"") {
+		t.Fatalf("body does not carry a table for both jobs:\n%s", body)
+	}
+	apiTable := body[strings.Index(body, "### job \"api\""):]
+	batchTable := body[strings.Index(body, "### job \"batch\""):]
+	if !strings.Contains(apiTable, "shared_metric") {
+		t.Errorf("shared_metric missing from the \"api\" job table:\n%s", body)
+	}
+	if !strings.Contains(batchTable, "shared_metric") {
+		t.Errorf("shared_metric missing from the \"batch\" job table:\n%s", body)
+	}
+	if !strings.Contains(body, "produced by more than one job") {
+		t.Errorf("body does not state that a shared metric is listed once per job while the total counts it once:\n%s", body)
+	}
+}
