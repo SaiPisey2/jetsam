@@ -1,10 +1,16 @@
 #!/bin/sh
-# Reject any commit message revealing AI/tool involvement.
-# Instructing agents not to add these has already failed once; this makes it
-# impossible rather than merely requested.
-if grep -qiE 'co-authored-by.*(claude|anthropic|copilot|gpt)|generated with|🤖|\bclaude\b|\banthropic\b' "$1"; then
-  echo "commit-msg hook: refusing commit — message contains AI/tool attribution." >&2
+# Reject a commit message carrying an AI-attribution trailer.
+#
+# This pattern is intentionally vendor-neutral: a public file naming
+# specific AI vendors would announce, to every visitor, exactly what it
+# guards against -- the same leak this project already fixes for its
+# .gitignore. co-authored-by:, "generated with", the robot emoji, and a
+# noreply@ address cover every realistic attribution trailer without
+# naming anyone. A stricter, vendor-specific list is kept locally only
+# (see .git/hooks), never in a file this repository publishes.
+if grep -qiE 'co-authored-by:|generated with|🤖|noreply@' "$1"; then
+  echo "commit-msg hook: refusing commit — message carries an attribution trailer." >&2
   echo "Offending line(s):" >&2
-  grep -inE 'co-authored-by.*(claude|anthropic|copilot|gpt)|generated with|🤖|\bclaude\b|\banthropic\b' "$1" >&2
+  grep -inE 'co-authored-by:|generated with|🤖|noreply@' "$1" >&2
   exit 1
 fi
