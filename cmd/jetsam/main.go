@@ -400,20 +400,34 @@ func eligibleForDrop(v verdict.Verdict, blocked, includeUnreferenced bool) bool 
 	return includeUnreferenced && !blocked && v.Grade == verdict.GradeUnreferenced
 }
 
-// applyAndReport calls emit.Apply through p and reports the outcome: the
-// opened (or found) PR's state and URL on stdout, or the error on stderr.
-// It is everything -apply does once there is something to propose,
-// factored out so it can be driven straight against
-// forge.NewFakeProvider() in a test without a real scan first -- and
-// notably, it never takes a token: by the time p exists, authentication is
-// already p's own business (see the comment on emit.Apply).
+// applyAndReport calls emit.Apply through p and reports the outcome on
+// stdout, or the error on stderr. It is everything -apply does once there
+// is something to propose, factored out so it can be driven straight
+// against forge.NewFakeProvider() in a test without a real scan first --
+// and notably, it never takes a token: by the time p exists,
+// authentication is already p's own business (see the comment on
+// emit.Apply).
+//
+// pr.State distinguishes three outcomes an operator needs to be able to
+// tell apart, not just "success": already open (nothing new happened),
+// already merged (the change landed some other way), and closed (a human
+// already declined this exact proposal -- emit.Apply does not reopen it,
+// and this must not report that as if a PR had just been opened).
 func applyAndReport(ctx context.Context, stdout, stderr io.Writer, p forge.Provider, owner, repo, base, path, oldYAML, newYAML, title, body string) int {
 	pr, err := emit.Apply(ctx, p, owner, repo, base, path, oldYAML, newYAML, title, body)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "%s: %s\n", pr.State, pr.URL)
+	switch pr.State {
+	case "closed":
+		fmt.Fprintf(stdout, "a previous proposal on branch %s was closed (#%d, %s); not reopening it. "+
+			"Change what jetsam would propose to get a new pull request.\n", pr.Branch, pr.Number, pr.URL)
+	case "merged":
+		fmt.Fprintf(stdout, "a previous proposal on branch %s was already merged (#%d, %s); nothing to do.\n", pr.Branch, pr.Number, pr.URL)
+	default: // "open": newly opened, or an already-open PR found and reused.
+		fmt.Fprintf(stdout, "%s: %s\n", pr.State, pr.URL)
+	}
 	return 0
 }
 
