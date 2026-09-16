@@ -17,6 +17,7 @@ import (
 	"github.com/SaiPisey2/jetsam/internal/inventory"
 	"github.com/SaiPisey2/jetsam/internal/promapi"
 	"github.com/SaiPisey2/jetsam/internal/report"
+	"github.com/SaiPisey2/jetsam/internal/safe"
 	"github.com/SaiPisey2/jetsam/internal/verdict"
 )
 
@@ -218,13 +219,47 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	res := verdict.Compute(inv, cor, false)
 	blocked := len(res.Blocked) > 0
 
+	var eligible []verdict.Verdict
+	for _, v := range res.Verdicts {
+		if eligibleForDrop(v, blocked, *includeUnreferenced) {
+			eligible = append(eligible, v)
+		}
+	}
+
+	// The scrape config is only read once there is at least one candidate
+	// worth checking it against: a run that would propose nothing anyway
+	// (the default install, or an all-blocked corpus) never needs
+	// prometheus_file to exist at all.
+	var promYAML []byte
+	definedJobs := map[string]bool{}
+	if len(eligible) > 0 {
+		var err error
+		promYAML, err = os.ReadFile(cfg.PrometheusFile)
+		if err != nil {
+			logErr(fmt.Errorf("read %s: %w", cfg.PrometheusFile, err))
+			return 1
+		}
+		definedJobs, err = emit.JobNames(string(promYAML))
+		if err != nil {
+			logErr(err)
+			return 1
+		}
+	}
+
+	// A candidate's own grade says whether jetsam can see it is unread at
+	// all; definedJobs says whether jetsam can actually WRITE that drop
+	// anywhere. The two are independent, and a metric produced by several
+	// jobs can be eligible on the first and only partly satisfy the
+	// second: propose it for whichever jobs a scrape_config actually
+	// exists for, and decline it, one job at a time, for the rest --
+	// never decline the whole metric because one of several jobs is
+	// missing, and never abort the whole run because Render would refuse
+	// one job it was never going to be asked about.
 	var drops []emit.Drop
 	var unresolved []string
+	var declined []string
 	unreferenced := map[string]bool{}
-	for _, v := range res.Verdicts {
-		if !eligibleForDrop(v, blocked, *includeUnreferenced) {
-			continue
-		}
+	for _, v := range eligible {
 		jobs, err := cl.QueryJobsFor(ctx, v.Metric)
 		if err != nil {
 			logErr(fmt.Errorf("resolve job for %s: %w", v.Metric, err))
@@ -237,11 +272,32 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 			unresolved = append(unresolved, v.Metric)
 			continue
 		}
-		if v.Grade == verdict.GradeUnreferenced {
+		matched := false
+		for _, j := range jobs {
+			if !definedJobs[j] {
+				declined = append(declined, fmt.Sprintf(
+					"metric %s: produced by job %q, which has no scrape_config in %s",
+					v.Metric, j, cfg.PrometheusFile))
+				continue
+			}
+			matched = true
+			drops = append(drops, emit.Drop{Metric: v.Metric, Series: v.Series, Job: j})
+		}
+		if matched && v.Grade == verdict.GradeUnreferenced {
 			unreferenced[v.Metric] = true
 		}
-		for _, j := range jobs {
-			drops = append(drops, emit.Drop{Metric: v.Metric, Series: v.Series, Job: j})
+	}
+
+	// printDeclined lists every candidate withheld because its job has no
+	// scrape_config in this file -- the same information, in the same
+	// style as a blocked rule, just named individually here because
+	// "which job, in which file" is exactly what an operator running
+	// against one file among several needs to see without reading the PR
+	// body in full.
+	printDeclined := func() {
+		fmt.Fprintf(stdout, "declined %d metric(s): their job has no scrape_config in %s:\n", len(declined), cfg.PrometheusFile)
+		for _, d := range declined {
+			fmt.Fprintf(stdout, "  - %s\n", safe.Text(d))
 		}
 	}
 
@@ -251,22 +307,37 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 		case blocked:
 			fmt.Fprintf(stdout, "%d rule(s) could not be read; a blocked rule may reference anything, "+
 				"so every drop is withheld until it is fixed. See `jetsam scan` for which.\n", len(res.Blocked))
-		case len(unresolved) > 0:
-			fmt.Fprintf(stdout, "%d metric(s) graded droppable have no job currently exposing them, so there is no scrape config to edit; skipped.\n", len(unresolved))
-		case *includeUnreferenced:
-			fmt.Fprintln(stdout, "-include-unreferenced is set, but no rule-unreferenced metric was found either -- "+
-				"there is nothing to widen the proposal with.")
 		default:
-			fmt.Fprintln(stdout, "no query log is configured, so jetsam cannot tell \"no rule mentions this\" apart from "+
-				"\"nobody reads this\" -- set query_log.path to make a metric eligible on evidence, or pass "+
-				"-include-unreferenced to propose dropping rule-unreferenced metrics on faith instead.")
+			if len(declined) > 0 {
+				printDeclined()
+			}
+			if len(unresolved) > 0 {
+				fmt.Fprintf(stdout, "%d metric(s) graded droppable have no job currently exposing them, so there is no scrape config to edit; skipped.\n", len(unresolved))
+			}
+			if len(declined) == 0 && len(unresolved) == 0 {
+				if *includeUnreferenced {
+					fmt.Fprintln(stdout, "-include-unreferenced is set, but no rule-unreferenced metric was found either -- "+
+						"there is nothing to widen the proposal with.")
+				} else {
+					fmt.Fprintln(stdout, "no query log is configured, so jetsam cannot tell \"no rule mentions this\" apart from "+
+						"\"nobody reads this\" -- set query_log.path to make a metric eligible on evidence, or pass "+
+						"-include-unreferenced to propose dropping rule-unreferenced metrics on faith instead.")
+				}
+			}
 		}
 		// Nothing droppable means nothing to commit or open, -apply
-		// included: no branch is created and no empty PR is opened.
+		// included: no branch is created and no empty PR is opened. This is
+		// success, not failure: a metric declined because its job lives in
+		// a different file is jetsam correctly refusing to guess, exactly
+		// like a blocked rule -- not a reason to exit non-zero.
 		fmt.Fprintln(stdout, "dry run: nothing opened. Re-run with -apply to open this PR.")
 		return 0
 	}
 
+	if len(declined) > 0 {
+		printDeclined()
+		fmt.Fprintln(stdout)
+	}
 	if len(unreferenced) > 0 {
 		// The same fact the PR body states, said here too: a dry run must
 		// not need the body read in full to know a drop rests on faith
@@ -276,11 +347,6 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 			"You have accepted that risk.\n\n", len(unreferenced))
 	}
 
-	promYAML, err := os.ReadFile(cfg.PrometheusFile)
-	if err != nil {
-		logErr(fmt.Errorf("read %s: %w", cfg.PrometheusFile, err))
-		return 1
-	}
 	newYAML, err := emit.Render(string(promYAML), drops)
 	if err != nil {
 		logErr(err)
@@ -294,7 +360,13 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	}
 	fmt.Fprintln(stdout)
 
-	title, body := emit.Body(drops, res, cor.Queries, inv.TotalSeries, cfg.Pricing.PerSeriesMonth)
+	// Every declined-by-missing-job candidate is reported in the PR body
+	// exactly like a blocked rule: same section, same count, so "how many
+	// things jetsam refused to touch" stays the one number that matters,
+	// not "how many metrics were dropped".
+	bodyRes := res
+	bodyRes.Blocked = append(append([]string(nil), res.Blocked...), declined...)
+	title, body := emit.Body(drops, bodyRes, cor.Queries, inv.TotalSeries, cfg.Pricing.PerSeriesMonth)
 	fmt.Fprintf(stdout, "%s\n\n%s\n\n", title, body)
 
 	if !*apply {
