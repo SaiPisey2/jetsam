@@ -1,9 +1,6 @@
 # local docs and planning
 docs/
 .superpowers/
-CLAUDE.md
-AGENTS.md
-.claude/
 
 # build output
 /jetsam
