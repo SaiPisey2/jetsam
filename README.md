@@ -1,5 +1,7 @@
 # jetsam
 
+Work in progress. Not yet released.
+
 Finds the Prometheus metrics nothing reads, and proposes dropping them.
 
 Prometheus tells you how many series each metric has. Your rules tell you
