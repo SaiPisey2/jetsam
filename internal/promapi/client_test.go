@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -169,6 +170,24 @@ func TestQueryJobsForRejectsAnErrorStatus(t *testing.T) {
 	}
 }
 
+func TestGetErrorNeverEchoesUserinfoOrQueryString(t *testing.T) {
+	// 127.0.0.1:1 is a reserved port nothing listens on, so this dials and
+	// fails, exercising the *url.Error path from http.Client.Do. No
+	// credential exists in v0.1, but a later version's request may carry
+	// one (userinfo or a token query parameter), and the raw dial error
+	// would otherwise put it straight into stderr, logs and CI output.
+	_, err := New("http://user:sekrit@127.0.0.1:1", 2*time.Second).TSDBStatus(context.Background(), 500)
+	if err == nil {
+		t.Fatal("TSDBStatus succeeded against an unreachable address, want an error")
+	}
+	if strings.Contains(err.Error(), "sekrit") {
+		t.Errorf("error leaks userinfo: %v", err)
+	}
+	if strings.Contains(err.Error(), "limit=") {
+		t.Errorf("error leaks the query string: %v", err)
+	}
+}
+
 func TestQueryJobsForQuotesAMetricNameThatIsAPromQLKeyword(t *testing.T) {
 	const wantQuery = `count by (job) ({__name__="on"})`
 
@@ -185,5 +204,30 @@ func TestQueryJobsForQuotesAMetricNameThatIsAPromQLKeyword(t *testing.T) {
 	// PromQL vector-matching keyword; unquoted interpolation breaks it.
 	if _, err := New(srv.URL, 5*time.Second).QueryJobsFor(context.Background(), "on"); err != nil {
 		t.Fatalf("QueryJobsFor: %v", err)
+	}
+}
+
+func TestGetRejectsAnOversizedBodyRatherThanTruncating(t *testing.T) {
+	// A body over the limit must produce a clear error, never a silently
+	// truncated decode: a short read would look like "this Prometheus has
+	// fewer metrics than it does," and every metric missing from that
+	// truncated read is graded as unused downstream.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Pad well past maxResponseBytes with whitespace before a body
+		// that would otherwise decode fine.
+		w.Write([]byte(`{"status":"success",`))
+		pad := strings.Repeat(" ", 64<<20+1024)
+		w.Write([]byte(pad))
+		w.Write([]byte(`"data":{"seriesCountByMetricName":[]}}`))
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, 30*time.Second).TSDBStatus(context.Background(), 500)
+	if err == nil {
+		t.Fatal("TSDBStatus succeeded against an oversized body, want an error")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error does not report the size limit was exceeded: %v", err)
 	}
 }

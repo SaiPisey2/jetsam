@@ -8,6 +8,7 @@ import (
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
+	"github.com/SaiPisey2/jetsam/internal/safe"
 	"github.com/SaiPisey2/jetsam/internal/verdict"
 )
 
@@ -23,8 +24,10 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 	} else {
 		fmt.Fprintf(w, "Droppable  none -- no query log configured, so ad-hoc reads are invisible\n")
 	}
+	// Blocked entries quote a rule's group, name and parse error, all
+	// sourced from the remote Prometheus: sanitize before printing.
 	for _, b := range res.Blocked {
-		fmt.Fprintf(w, "Blocked    %s\n", b)
+		fmt.Fprintf(w, "Blocked    %s\n", safe.Text(b))
 	}
 	fmt.Fprintln(w)
 
@@ -35,8 +38,12 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 		if v.Droppable {
 			drop = "yes"
 		}
+		// The metric name is remote-sourced; the reason may embed
+		// remote-sourced detail too. Sanitize both -- an ANSI escape or a
+		// newline here can clear/forge a terminal line or break a
+		// Markdown table in a generated pull request.
 		fmt.Fprintf(tw, "%d\t%.1f%%\t%s\t%s\t%s\t%s\n",
-			v.Series, 100*inv.Share(v.Series), v.Grade, drop, v.Metric, v.Reason)
+			v.Series, 100*inv.Share(v.Series), v.Grade, drop, safe.Text(v.Metric), safe.Text(v.Reason))
 	}
 	tw.Flush()
 }

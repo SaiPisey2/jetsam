@@ -5,13 +5,35 @@ package promapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// maxResponseBytes bounds every response body jetsam decodes. A legitimate
+// TSDB status or rules response from even a very large Prometheus is
+// orders of magnitude smaller than this; the bound exists to turn a
+// compromised or misbehaving Prometheus's unbounded body into a clear
+// error rather than either exhausting memory or, worse, silently
+// truncating the JSON into a partial decode. A partial decode is the
+// dangerous direction here: a short read looks like "this Prometheus has
+// fewer metrics than it does", and every metric missing from that
+// truncated read is then graded as unused downstream.
+const maxResponseBytes = 64 << 20 // 64 MiB
+
+// safeURL renders a URL for an error message without anything that could
+// be a credential: no userinfo (url.URL.Host never includes it) and no
+// query string, which may carry a token as a query parameter. Do not
+// "simplify" this back to u.String() -- that would put the full request,
+// including any secret, into stderr, logs and CI output.
+func safeURL(u *url.URL) string {
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
+}
 
 // Client reads a Prometheus HTTP API. It is read-only by construction:
 // every method here is a GET.
@@ -48,12 +70,37 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out any) er
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("get %s: %w", path, err)
+		// http.Client.Do wraps failures in a *url.Error whose Error()
+		// embeds the complete request URL, query string included. No
+		// credential exists in v0.1, but a later version's request may
+		// carry one (a token query parameter or userinfo), and that must
+		// never reach stderr, logs or CI output. Report the underlying
+		// cause plus a scheme/host/path-only location instead of the
+		// wrapper's own message.
+		var uerr *url.Error
+		cause := error(err)
+		if errors.As(err, &uerr) {
+			cause = uerr.Err
+		}
+		return fmt.Errorf("get %s: %w", safeURL(req.URL), cause)
 	}
 	defer resp.Body.Close()
 
+	// Bound the read: see maxResponseBytes. Reading one byte past the
+	// limit, rather than exactly at it, lets us tell "body was exactly
+	// the limit" apart from "body was longer and got cut off" -- the
+	// latter must be a clear error, never a silent truncated decode.
+	lr := &io.LimitedReader{R: resp.Body, N: maxResponseBytes + 1}
+	body, err := io.ReadAll(lr)
+	if err != nil {
+		return fmt.Errorf("read %s (http %d): %w", safeURL(req.URL), resp.StatusCode, err)
+	}
+	if lr.N == 0 {
+		return fmt.Errorf("%s: response body exceeds %d byte limit", safeURL(req.URL), maxResponseBytes)
+	}
+
 	var env envelope
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+	if err := json.Unmarshal(body, &env); err != nil {
 		return fmt.Errorf("decode %s (http %d): %w", path, resp.StatusCode, err)
 	}
 	if env.Status != "success" {

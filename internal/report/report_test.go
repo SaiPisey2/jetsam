@@ -27,3 +27,24 @@ func TestScanStatesWhyNothingIsProposed(t *testing.T) {
 		t.Errorf("report does not explain that a query log is missing:\n%s", out)
 	}
 }
+
+func TestScanNeverEmitsARawEscapeByte(t *testing.T) {
+	// A metric name carrying an ANSI escape can clear or forge lines in a
+	// terminal. The remote Prometheus is not trusted, so the raw ESC byte
+	// (0x1b) must never reach the rendered report.
+	const hostile = "up\x1b[2K\x1b[1;31mFAKE\x1b[0m"
+	inv := inventory.Build(map[string]int{hostile: 400})
+	c := corpus.Corpus{Queries: 0, Used: map[string]bool{}, Produced: map[string]bool{}}
+	res := verdict.Compute(inv, c, false)
+
+	var sb strings.Builder
+	Scan(&sb, inv, c, res)
+	out := sb.String()
+
+	if strings.ContainsRune(out, 0x1b) {
+		t.Errorf("report contains a raw ESC byte:\n%q", out)
+	}
+	if !strings.Contains(out, `\x1b`) {
+		t.Errorf("report does not render the escape visibly:\n%s", out)
+	}
+}
