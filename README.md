@@ -1,8 +1,8 @@
 # jetsam
 
-v0.1.0. Finds unread metrics and proposes dropping them; see Limits below for what it cannot see yet.
-
 Finds the Prometheus metrics nothing reads, and proposes dropping them.
+
+v0.1.0 -- see Limits for what it cannot see yet.
 
 Prometheus tells you how many series each metric has. Your rules tell you
 which metrics anything actually queries. jetsam joins the two and opens a
@@ -30,18 +30,6 @@ jetsam propose -include-unreferenced
 config and the PR body -- and opens nothing. Add `-apply -owner OWNER -repo
 REPO` to actually open it, with a GitHub token in `$GITHUB_TOKEN`:
 
-```
-export GITHUB_TOKEN=...
-jetsam propose -apply -owner myorg -repo myrepo
-```
-
-On a default install `-apply` therefore opens nothing: there is nothing to
-open until you pass `-include-unreferenced` or configure a query log.
-
-The token is read from the environment only -- never accept it as a flag,
-since a flag value lands in `ps` output and shell history. `-apply` without
-`-owner`, `-repo`, or a token is refused before anything else runs.
-
 By default `propose` only ever proposes a metric backed by real evidence
 that nothing reads it, which in v0.1 (no query log support yet) means it
 proposes nothing at all. Pass `-include-unreferenced` to also propose
@@ -51,16 +39,27 @@ which grade every drop rests on and carries an extra warning wherever that
 grade is `unreferenced`; a non-empty set of unreadable rules still forbids
 every drop regardless of this flag.
 
+```
+export GITHUB_TOKEN=...
+jetsam propose -apply -owner myorg -repo myrepo
+```
+
+Because of that, `-apply` opens nothing on a default install until you pass
+`-include-unreferenced` or configure a query log.
+
+The token is read from the environment only -- never accept it as a flag,
+since a flag value lands in `ps` output and shell history. `-apply` without
+`-owner`, `-repo`, or a token is refused before anything else runs.
+
 ## Limits
 
 - **Rules are the only evidence.** jetsam reads `/api/v1/rules`. It cannot
   see Grafana dashboards, ad-hoc queries, Explore, `remote_read`, or
   anything scraping `/federate`. A metric read only through one of those
   looks unreferenced. Grafana dashboards and query-log ingestion are v0.3.
-- **Nothing is proposed without evidence.** Without a query log every
-  unread metric is graded `unreferenced`, which never auto-proposes.
-  `-include-unreferenced` is how you act on rule evidence alone, and the
-  pull request says so.
+- **Nothing is proposed without evidence.** See `-include-unreferenced`
+  above. Without a query log, every unread metric is graded
+  `unreferenced`, which never auto-proposes.
 - **One unreadable rule blocks every drop.** A rule jetsam cannot parse
   might reference anything, so nothing is proposed until it is fixed.
   `jetsam scan` names which.
