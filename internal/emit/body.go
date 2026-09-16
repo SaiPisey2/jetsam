@@ -37,10 +37,18 @@ func addSeriesSaturating(a, b int) int {
 // deleting monitoring data. A metric name that renders as a live link or a
 // tracking beacon in that surface is a phishing vector, not a cosmetic bug.
 //
-// safe.Text handles the first problem: a control character -- an ANSI
-// escape, a bare CR/LF, a tab -- is rendered as its visible escape sequence
-// instead of executing in a terminal or forging a line break inside what is
-// meant to be one Markdown table row.
+// safe.Text handles the first problem: any rune that is not printable is
+// rendered as its visible escape sequence instead of being emitted. That
+// covers control characters -- an ANSI escape, a bare CR/LF, a tab, which
+// execute in a terminal or forge a line break inside what is meant to be
+// one Markdown table row -- and, just as importantly here, the Unicode
+// FORMAT characters that are not control characters at all: U+202E and the
+// directional isolates reorder the glyphs after them, so a name can be made
+// to DISPLAY as a different name than the one being dropped, and U+200B,
+// U+00AD and U+FEFF are invisible outright, so a reviewer cannot see that
+// the name in the table is not the name they know. On an approval surface
+// for an irreversible deletion, a name that does not read as itself is the
+// whole attack.
 //
 // Markdown and GitHub's raw-HTML pass-through add every other problem
 // safe.Text does not touch, so mdText neutralises each construct that turns

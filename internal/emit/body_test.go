@@ -553,3 +553,28 @@ func TestBodyListsASharedMetricUnderEveryJob(t *testing.T) {
 		t.Errorf("body does not state that a shared metric is listed once per job while the total counts it once:\n%s", body)
 	}
 }
+
+// TestBodyRendersDeceptiveNamesVisibly is the PR-body-level check on what
+// safe.Text guarantees per string: nothing that reorders or hides glyphs
+// reaches the surface a human approves an irreversible deletion from.
+func TestBodyRendersDeceptiveNamesVisibly(t *testing.T) {
+	rlo, pop, zwsp := string(rune(0x202E)), string(rune(0x202C)), string(rune(0x200B))
+	metric := "cpu_total" + rlo + "latot_ksid" + pop
+	job := "api" + zwsp + "x"
+
+	drops := []Drop{{Metric: metric, Series: 10, Job: job}}
+	res := verdict.Result{Verdicts: []verdict.Verdict{{Metric: metric, Grade: verdict.GradeUnqueried}}}
+	_, body := Body(drops, res, 5, inventory.Inventory{TotalSeries: 100}, 0)
+
+	for _, r := range []rune{0x202E, 0x202C, 0x200B} {
+		if strings.ContainsRune(body, r) {
+			t.Errorf("PR body still carries U+%04X verbatim; it must be rendered as a visible escape", r)
+		}
+	}
+	for _, r := range []rune{0x202E, 0x202C, 0x200B} {
+		want := fmt.Sprintf("\\u%04x", r)
+		if !strings.Contains(body, want) {
+			t.Errorf("PR body does not contain %s; want the code point rendered visibly", want)
+		}
+	}
+}
