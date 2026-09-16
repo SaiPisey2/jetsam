@@ -37,6 +37,12 @@ type Drop struct {
 //     regexp.QuoteMeta before it becomes that value, so the rule drops
 //     exactly the metric named and nothing a regex metacharacter in that
 //     name would otherwise make it match too.
+//
+// Render is idempotent per job: a drop already covered by an equivalent
+// rule in the input is not appended again, so re-running Render against its
+// own prior output -- as happens across repeated scans of an evolving repo
+// -- produces byte-identical output rather than growing the file on every
+// run. See appendDrops for exactly what counts as equivalent.
 func Render(promYAML string, drops []Drop) (string, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal([]byte(promYAML), &doc); err != nil {
@@ -64,8 +70,13 @@ func Render(promYAML string, drops []Drop) (string, error) {
 			continue
 		}
 		seen[name] = true
+		dedup := map[string]bool{}
 		metrics := make([]string, 0, len(ds))
 		for _, d := range ds {
+			if dedup[d.Metric] {
+				continue
+			}
+			dedup[d.Metric] = true
 			metrics = append(metrics, d.Metric)
 		}
 		sort.Strings(metrics)
@@ -90,8 +101,20 @@ func Render(promYAML string, drops []Drop) (string, error) {
 }
 
 // appendDrops adds one drop rule per metric to sc's metric_relabel_configs,
-// creating the key when it is absent. metrics must already be sorted so
-// re-running Render on the same input produces byte-identical output.
+// creating the key when it is absent. metrics must already be sorted and
+// de-duplicated so re-running Render on the same input produces
+// byte-identical output.
+//
+// A metric already covered by an equivalent existing rule is skipped, so
+// that re-running Render against its own prior output -- as happens across
+// repeated scans of an evolving repo -- does not append a second,
+// byte-identical rule on every run. "Equivalent" is deliberately narrow:
+// exact match on source_labels: [__name__], action: drop, and regex equal
+// to regexp.QuoteMeta(m). This is never widened to regex containment (e.g.
+// treating an existing `go_.*` as already covering `go_gc_duration_seconds`)
+// -- getting that judgment wrong in the permissive direction would silently
+// decline to drop something the operator asked to drop, which is worse than
+// a harmless duplicate rule.
 func appendDrops(sc *yaml.Node, metrics []string) {
 	list := mappingValue(sc, "metric_relabel_configs")
 	if list == nil {
@@ -101,8 +124,65 @@ func appendDrops(sc *yaml.Node, metrics []string) {
 		list = sc.Content[len(sc.Content)-1]
 	}
 	for _, m := range metrics {
+		if hasEquivalentDropRule(list, regexp.QuoteMeta(m)) {
+			continue
+		}
 		list.Content = append(list.Content, dropRule(m))
 	}
+}
+
+// hasEquivalentDropRule reports whether list already contains a drop rule
+// equivalent to one jetsam would emit for a metric whose escaped regex is
+// escapedRegex. A rule that cannot be confidently read as equivalent --
+// because it is malformed, or shaped differently than the ones this package
+// emits -- is treated as not equivalent, never as a match: the safe
+// direction on doubt is a duplicate rule, not a silently skipped drop.
+func hasEquivalentDropRule(list *yaml.Node, escapedRegex string) bool {
+	if list == nil {
+		return false
+	}
+	for _, rule := range list.Content {
+		if isEquivalentDropRule(rule, escapedRegex) {
+			return true
+		}
+	}
+	return false
+}
+
+// isEquivalentDropRule reports whether rule is a metric_relabel_configs
+// entry with source_labels exactly [__name__], action exactly "drop", and
+// regex exactly equal to escapedRegex. Any deviation -- missing keys,
+// source_labels that is not a one-element sequence, a non-scalar regex or
+// action, an extra key -- makes it report false rather than panic or guess.
+func isEquivalentDropRule(rule *yaml.Node, escapedRegex string) bool {
+	if rule == nil || rule.Kind != yaml.MappingNode {
+		return false
+	}
+	var action, regex string
+	var sawAction, sawRegex, sourceLabelsOK bool
+	for i := 0; i+1 < len(rule.Content); i += 2 {
+		key, val := rule.Content[i], rule.Content[i+1]
+		if key == nil || key.Kind != yaml.ScalarNode || val == nil {
+			continue
+		}
+		switch key.Value {
+		case "action":
+			if val.Kind == yaml.ScalarNode {
+				action, sawAction = val.Value, true
+			}
+		case "regex":
+			if val.Kind == yaml.ScalarNode {
+				regex, sawRegex = val.Value, true
+			}
+		case "source_labels":
+			sourceLabelsOK = val.Kind == yaml.SequenceNode &&
+				len(val.Content) == 1 &&
+				val.Content[0] != nil &&
+				val.Content[0].Kind == yaml.ScalarNode &&
+				val.Content[0].Value == "__name__"
+		}
+	}
+	return sawAction && action == "drop" && sawRegex && regex == escapedRegex && sourceLabelsOK
 }
 
 // dropRule builds one metric_relabel_configs entry as a YAML mapping node,
