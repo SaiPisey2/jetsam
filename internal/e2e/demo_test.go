@@ -49,7 +49,7 @@ func TestAgainstThePublicDemo(t *testing.T) {
 		t.Errorf("real mixin rules failed to parse: %v", cor.Blocked)
 	}
 	if len(cor.Used) == 0 {
-		t.Error("no metric marked used by 51 real rules -- reference extraction is broken")
+		t.Error("no metric marked used by real mixin rules -- reference extraction is broken")
 	}
 
 	res := verdict.Compute(inv, cor, false)

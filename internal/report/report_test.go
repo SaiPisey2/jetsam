@@ -29,6 +29,55 @@ func TestScanStatesWhyNothingIsProposed(t *testing.T) {
 	}
 }
 
+// TestScanBlamesABlockedRuleNotAMissingQueryLog pins the "small" fix: when
+// DroppableSeries is 0 because a blocked rule withholds every drop, the
+// message must say so -- not blame a missing query log, which would tell
+// an operator to configure query_log.path when doing so would change
+// nothing until the blocked rule itself is fixed.
+func TestScanBlamesABlockedRuleNotAMissingQueryLog(t *testing.T) {
+	inv := inventory.Build(promapi.Status{Counts: map[string]int{"unread": 400}, HeadSeries: 400})
+	c := corpus.Corpus{Queries: 1, Used: map[string]bool{}, Produced: map[string]bool{}, Blocked: []string{"rule g/Broken: parse error"}}
+	// haveQueryLog=true: even WITH a query log configured, a blocked rule
+	// still forbids every drop, so "no query log" would be doubly wrong
+	// here.
+	res := verdict.Compute(inv, c, true)
+
+	var sb strings.Builder
+	Scan(&sb, inv, c, res)
+	out := sb.String()
+
+	if strings.Contains(out, "Droppable  none -- no query log") {
+		t.Errorf("report blames a missing query log when a blocked rule is the actual reason:\n%s", out)
+	}
+	if !strings.Contains(out, "Droppable  none -- 1 rule(s) could not be read") {
+		t.Errorf("report does not blame the blocked rule:\n%s", out)
+	}
+}
+
+// TestScanSaysEverythingIsAccountedForWhenNothingIsMissing covers the third
+// condition: a query log IS configured, nothing is blocked, and every
+// metric is genuinely used -- "Droppable none" here is not evidence of a
+// gap, and the message must not claim one exists.
+func TestScanSaysEverythingIsAccountedForWhenNothingIsMissing(t *testing.T) {
+	inv := inventory.Build(promapi.Status{Counts: map[string]int{"used_metric": 400}, HeadSeries: 400})
+	c := corpus.Corpus{Queries: 1, Used: map[string]bool{"used_metric": true}, Produced: map[string]bool{}}
+	res := verdict.Compute(inv, c, true)
+
+	var sb strings.Builder
+	Scan(&sb, inv, c, res)
+	out := sb.String()
+
+	if strings.Contains(out, "no query log") {
+		t.Errorf("report blames a missing query log although one is configured and nothing was missed:\n%s", out)
+	}
+	if strings.Contains(out, "could not be read") {
+		t.Errorf("report blames a blocked rule that does not exist:\n%s", out)
+	}
+	if !strings.Contains(out, "Droppable  none -- every metric is referenced") {
+		t.Errorf("report does not state that everything is accounted for:\n%s", out)
+	}
+}
+
 func TestScanNeverEmitsARawEscapeByte(t *testing.T) {
 	// A metric name carrying an ANSI escape can clear or forge lines in a
 	// terminal. The remote Prometheus is not trusted, so the raw ESC byte

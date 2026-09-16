@@ -27,7 +27,22 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 		fmt.Fprintf(w, "Droppable  %d series (%.1f%% of stored)\n",
 			res.DroppableSeries, 100*inv.Share(res.DroppableSeries))
 	} else {
-		fmt.Fprintf(w, "Droppable  none -- no query log configured, so ad-hoc reads are invisible\n")
+		// "Droppable none" has more than one possible cause, and they are
+		// not interchangeable: a blocked corpus withholds every drop
+		// regardless of evidence, so blaming a missing query log there is
+		// simply wrong -- it tells an operator to configure query_log.path
+		// when doing so would change nothing until the blocked rule is
+		// fixed. Only print the query-log explanation when it is actually
+		// why nothing is droppable.
+		switch {
+		case len(res.Blocked) > 0:
+			fmt.Fprintf(w, "Droppable  none -- %d rule(s) could not be read; a blocked rule may reference "+
+				"anything, so every drop is withheld until it is fixed\n", len(res.Blocked))
+		case anyUnreferenced(res.Verdicts):
+			fmt.Fprintln(w, "Droppable  none -- no query log configured, so ad-hoc reads are invisible")
+		default:
+			fmt.Fprintln(w, "Droppable  none -- every metric is referenced by a rule or was read within the query-log window")
+		}
 	}
 	// Blocked entries quote a rule's group, name and parse error, all
 	// sourced from the remote Prometheus: sanitize before printing.
@@ -51,4 +66,19 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 			v.Series, 100*inv.Share(v.Series), v.Grade, drop, safe.Text(v.Metric), safe.Text(v.Reason))
 	}
 	tw.Flush()
+}
+
+// anyUnreferenced reports whether any verdict rests on GradeUnreferenced --
+// the grade that only exists because no query log is configured. Its
+// presence is what makes "no query log configured" the correct explanation
+// for "Droppable none"; its absence means every metric was either used or
+// fully evaluated against an actual query log, and nothing was missed for
+// lack of one.
+func anyUnreferenced(vs []verdict.Verdict) bool {
+	for _, v := range vs {
+		if v.Grade == verdict.GradeUnreferenced {
+			return true
+		}
+	}
+	return false
 }
