@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/SaiPisey2/jetsam/internal/config"
 	"github.com/SaiPisey2/jetsam/internal/corpus"
@@ -20,6 +21,70 @@ import (
 	"github.com/SaiPisey2/jetsam/internal/safe"
 	"github.com/SaiPisey2/jetsam/internal/verdict"
 )
+
+// jobResolveWorkers bounds how many QueryJobsFor calls resolveJobs runs at
+// once. promapi.Client holds only a base URL string and an *http.Client,
+// both safe for concurrent use, and every call it makes is a GET -- there
+// is nothing here that needs more synchronization than "don't open an
+// unbounded number of sockets at once". 8 was chosen as a modest, fixed
+// concurrency: enough that ~1300 candidates (the public demo's full
+// -include-unreferenced run) resolve in well under a minute at ~0.17s per
+// query, without turning a single propose run into a thundering herd
+// against someone's Prometheus.
+const jobResolveWorkers = 8
+
+// resolveJobs resolves the job labels currently exposing each of metrics,
+// one cl.QueryJobsFor call per metric, run through a bounded pool of
+// jobResolveWorkers goroutines instead of one call at a time.
+//
+// A serial loop cannot fit inside any reasonable deadline once there are
+// more than a few hundred candidates: measured against the public demo
+// (smaller than any production Prometheus), ~0.17s per query times ~1300
+// candidates is ~220s against a 120s default timeout -- propose -include-
+// unreferenced could not complete AT ALL on the config `jetsam init`
+// writes. Eight workers bring that down to ~28s.
+//
+// Results are collected into jobs, an indexed slice with one slot per
+// metric -- never a shared map filled in from multiple goroutines. Each
+// worker only ever writes the slot matching the index it was handed, so no
+// synchronization is needed on the writes themselves, and the caller can
+// always read jobs[i] as "the result for metrics[i]" regardless of which
+// query happened to finish first. That is what keeps propose's output
+// deterministic: an unstable order would make every PR diff look
+// different between runs for no reason, even though nothing changed.
+//
+// The first error, in metrics' own index order (not completion order), is
+// returned; every other query still runs to completion (there is no early
+// cancellation on error), but a non-nil error means jobs must not be used
+// at all.
+func resolveJobs(ctx context.Context, cl *promapi.Client, metrics []string) ([][]string, error) {
+	jobs := make([][]string, len(metrics))
+	errs := make([]error, len(metrics))
+
+	work := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < jobResolveWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range work {
+				jobs[i], errs[i] = cl.QueryJobsFor(ctx, metrics[i])
+			}
+		}()
+	}
+	for i := range metrics {
+		work <- i
+	}
+	close(work)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			return nil, fmt.Errorf("resolve job for %s: %w", metrics[i], err)
+		}
+	}
+	return jobs, nil
+}
 
 const usage = `jetsam finds Prometheus metrics nothing reads.
 
@@ -255,16 +320,31 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	// never decline the whole metric because one of several jobs is
 	// missing, and never abort the whole run because Render would refuse
 	// one job it was never going to be asked about.
+	// Job resolution gets its own deadline, freshly started here rather
+	// than continuing to draw down cfg.Prometheus.Timeout: by this point
+	// that budget has already paid for TSDBStatus and
+	// AlertingAndRecordingRules, and a serial QueryJobsFor per candidate
+	// cannot fit what remains of it once there are more than a few hundred
+	// candidates (see resolveJobs).
+	jobCtx, jobCancel := context.WithTimeout(context.Background(), cfg.Prometheus.Timeout)
+	defer jobCancel()
+
+	metricNames := make([]string, len(eligible))
+	for i, v := range eligible {
+		metricNames[i] = v.Metric
+	}
+	jobsByCandidate, err := resolveJobs(jobCtx, cl, metricNames)
+	if err != nil {
+		logErr(err)
+		return 1
+	}
+
 	var drops []emit.Drop
 	var unresolved []string
 	var declined []string
 	unreferenced := map[string]bool{}
-	for _, v := range eligible {
-		jobs, err := cl.QueryJobsFor(ctx, v.Metric)
-		if err != nil {
-			logErr(fmt.Errorf("resolve job for %s: %w", v.Metric, err))
-			return 1
-		}
+	for i, v := range eligible {
+		jobs := jobsByCandidate[i]
 		if len(jobs) == 0 {
 			// Nothing is currently exposing this metric under any job
 			// label, so there is no scrape config to add a drop rule to.
