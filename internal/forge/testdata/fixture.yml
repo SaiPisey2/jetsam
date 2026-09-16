@@ -1,0 +1,31 @@
+# Fixture rule file for internal/forge's diff-generation tests. Deliberately
+# carries comments and unusual spacing that a surgical edit must leave
+# completely untouched, everywhere except the lines actually being changed.
+groups:
+  - name: fixture
+    rules:
+      # A rule with nothing unusual about it, used to exercise a plain
+      # retire (delete) edit.
+      - alert: RetireMe
+        expr: up == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "always down"
+
+      # This blank line and these four comment lines sit between RetireMe
+      # and TuneMe. They introduce TuneMe; they are not RetireMe's, and a
+      # retire edit must leave every one of them exactly where it is --
+      # deleting another team's comments is not a minimal diff.
+      - alert: TuneMe
+        expr: rate(errors_total[5m]) > 0
+        for:    1m   # keep this pager quiet during a deploy
+        labels:
+          team: payments
+        annotations:
+          runbook: "https://runbooks.example/tuneme"
+
+      - alert: NoForField
+        expr: up == 0
+        labels:
+          severity: warning
