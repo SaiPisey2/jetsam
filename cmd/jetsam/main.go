@@ -382,6 +382,28 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 		}
 	}
 
+	// unresolvedMsgs mirrors declined's shape -- one formatted line per
+	// candidate -- so it can be printed the same way and appended to the
+	// PR body's blocked list the same way. These are metrics graded
+	// droppable with zero jobs currently exposing them: a target that
+	// stopped being scraped, or a metric a deploy removed. They used to be
+	// reported ONLY when propose found nothing else to drop at all; with
+	// one or more real drops in the same run they simply vanished from
+	// both the terminal and the PR body, even though a metric with no
+	// current producer is among the best drop candidates there is.
+	unresolvedMsgs := make([]string, len(unresolved))
+	for i, m := range unresolved {
+		unresolvedMsgs[i] = fmt.Sprintf(
+			"metric %s: graded droppable, but no job currently exposes it, so there is no scrape config to edit",
+			m)
+	}
+	printUnresolved := func() {
+		fmt.Fprintf(stdout, "%d metric(s) graded droppable have no job currently exposing them, so there is no scrape config to edit:\n", len(unresolved))
+		for _, m := range unresolved {
+			fmt.Fprintf(stdout, "  - %s\n", safe.Text(m))
+		}
+	}
+
 	if len(drops) == 0 {
 		fmt.Fprintln(stdout, "propose: nothing to propose.")
 		switch {
@@ -393,7 +415,7 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 				printDeclined()
 			}
 			if len(unresolved) > 0 {
-				fmt.Fprintf(stdout, "%d metric(s) graded droppable have no job currently exposing them, so there is no scrape config to edit; skipped.\n", len(unresolved))
+				printUnresolved()
 			}
 			if len(declined) == 0 && len(unresolved) == 0 {
 				if *includeUnreferenced {
@@ -430,6 +452,10 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 		printDeclined()
 		fmt.Fprintln(stdout)
 	}
+	if len(unresolved) > 0 {
+		printUnresolved()
+		fmt.Fprintln(stdout)
+	}
 	if len(unreferenced) > 0 {
 		// The same fact the PR body states, said here too: a dry run must
 		// not need the body read in full to know a drop rests on faith
@@ -461,12 +487,12 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	fmt.Fprint(stdout, diff)
 	fmt.Fprintln(stdout)
 
-	// Every declined-by-missing-job candidate is reported in the PR body
-	// exactly like a blocked rule: same section, same count, so "how many
-	// things jetsam refused to touch" stays the one number that matters,
-	// not "how many metrics were dropped".
+	// Every declined-by-missing-job candidate, and every unresolved one, is
+	// reported in the PR body exactly like a blocked rule: same section,
+	// same count, so "how many things jetsam refused to touch" stays the
+	// one number that matters, not "how many metrics were dropped".
 	bodyRes := res
-	bodyRes.Blocked = append(append([]string(nil), res.Blocked...), declined...)
+	bodyRes.Blocked = append(append(append([]string(nil), res.Blocked...), declined...), unresolvedMsgs...)
 	title, body := emit.Body(drops, bodyRes, cor.Queries, inv, cfg.Pricing.PerSeriesMonth)
 	fmt.Fprintf(stdout, "%s\n\n%s\n\n", title, body)
 
