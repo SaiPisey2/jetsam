@@ -34,13 +34,18 @@ func Build(rules []promapi.Rule, allMetrics []string) Corpus {
 	c := Corpus{Used: map[string]bool{}, Produced: map[string]bool{}}
 	for _, r := range rules {
 		c.Queries++
-		if r.Type == "recording" {
-			c.Produced[r.Name] = true
-		}
 		refs, err := Extract(r.Query)
 		if err != nil {
+			// A rule jetsam cannot read must contribute nothing in either
+			// direction: not to Used (it might reference anything) and not
+			// to Produced (jetsam cannot even trust that this is what the
+			// rule claims to write). continue must run before either map is
+			// touched.
 			c.Blocked = append(c.Blocked, fmt.Sprintf("rule %s/%s: %v", r.Group, r.Name, err))
 			continue
+		}
+		if r.Type == "recording" {
+			c.Produced[r.Name] = true
 		}
 		for _, m := range refs.Resolve(allMetrics) {
 			c.Used[m] = true
