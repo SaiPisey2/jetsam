@@ -5,12 +5,36 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
+
+// maxResponseBytes bounds every response body this provider reads. GitHub's
+// Contents API already refuses to return base64 content for a file over
+// 1 MB, and every other response read here -- a page of pull requests, a
+// single git ref -- is a small, bounded JSON object even at GitHub's own
+// page-size ceiling. The limit exists so a misbehaving or compromised
+// endpoint (a wrong BaseURL, a MITM) produces a clear error instead of
+// either exhausting memory or, worse, handing json.Unmarshal a silently
+// truncated body -- see the lr.N == 0 check in do(), which catches
+// truncation before any parsing is attempted.
+const maxResponseBytes = 10 << 20 // 10 MiB
+
+// safeURL renders a URL for an error message without anything that could
+// be a credential: no userinfo (url.URL.Host never includes it) and no
+// query string, which is where this provider's own list-PR parameters sit
+// today and where a token would sit if it were ever passed as a query
+// parameter instead of a header. Do not "simplify" this back to
+// u.String() -- that would put the full request, including any secret,
+// into stderr, logs and CI output.
+func safeURL(u *url.URL) string {
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
+}
 
 // GitHubProvider implements Provider against the GitHub REST API (v3),
 // using only net/http and encoding/json -- no SDK dependency, so this is
@@ -68,13 +92,35 @@ func (g *GitHubProvider) do(ctx context.Context, method, path string, body any, 
 
 	resp, err := g.client().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, path, err)
+		// http.Client.Do wraps failures in a *url.Error whose Error()
+		// embeds the complete request URL, query string included. This
+		// provider sends its token only via the Authorization header (see
+		// NewGitHubProvider), but the query string already carries
+		// owner/repo/branch names and is exactly where a token would sit
+		// if that ever changed -- report the underlying cause plus a
+		// scheme/host/path-only location instead of the wrapper's own
+		// message.
+		var uerr *url.Error
+		cause := error(err)
+		if errors.As(err, &uerr) {
+			cause = uerr.Err
+		}
+		return nil, fmt.Errorf("%s %s: %w", method, safeURL(req.URL), cause)
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	// Bound the read: see maxResponseBytes. Reading one byte past the
+	// limit, rather than exactly at it, lets us tell "body was exactly the
+	// limit" apart from "body was longer and got cut off" -- the latter
+	// must be a clear error, never a silently truncated body handed to
+	// json.Unmarshal.
+	lr := &io.LimitedReader{R: resp.Body, N: maxResponseBytes + 1}
+	data, err := io.ReadAll(lr)
 	if err != nil {
 		return resp, fmt.Errorf("%s %s: read response: %w", method, path, err)
+	}
+	if lr.N == 0 {
+		return resp, fmt.Errorf("%s %s: response body exceeds %d byte limit", method, path, maxResponseBytes)
 	}
 	if resp.StatusCode >= 300 {
 		return resp, fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(data)))

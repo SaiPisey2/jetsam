@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ghStub is a minimal stand-in for the GitHub REST API: enough of the
@@ -293,5 +294,64 @@ func TestFindPRReportsAMergedPRAsMerged(t *testing.T) {
 	}
 	if pr.State != "merged" {
 		t.Errorf("state = %q, want merged", pr.State)
+	}
+}
+
+// TestDoErrorNeverEchoesUserinfoOrQueryString: 127.0.0.1:1 is a reserved
+// port nothing listens on, so this dials and fails, exercising the
+// *url.Error path from http.Client.Do. The token itself never reaches the
+// URL (NewGitHubProvider sends it only via the Authorization header), but
+// the query string this provider builds for FindPR (state=all&base=...&
+// head=...) is exactly where a token would sit if that ever changed, and
+// userinfo in a misconfigured BaseURL is an equally live way for a
+// credential to end up in the URL that http.Client.Do embeds in its own
+// error text.
+func TestDoErrorNeverEchoesUserinfoOrQueryString(t *testing.T) {
+	g := &GitHubProvider{
+		BaseURL: "http://user:sekrit@127.0.0.1:1",
+		Client:  &http.Client{Timeout: 2 * time.Second},
+	}
+	_, err := g.FindPR(context.Background(), "acme", "rules", "main", "somebranch")
+	if err == nil {
+		t.Fatal("FindPR succeeded against an unreachable address, want an error")
+	}
+	if strings.Contains(err.Error(), "sekrit") {
+		t.Errorf("error leaks userinfo: %v", err)
+	}
+	if strings.Contains(err.Error(), "state=all") {
+		t.Errorf("error leaks the query string: %v", err)
+	}
+}
+
+// TestDoRejectsAnOversizedBodyRatherThanTruncating: a body over
+// maxResponseBytes must produce a clear error, never a silently truncated
+// decode. For CommitFiles specifically, a truncated getContent response
+// fed to json.Unmarshal would either fail to parse (the ordinary case,
+// since truncating mid-object almost always breaks JSON syntax) or, in
+// the worst case nothing here should rely on avoiding by luck, decode into
+// content that does not match what is actually on the remote -- which
+// could make the BaseContent safety check compare against the wrong
+// bytes. Catching the oversized body before any parsing is attempted
+// closes that off entirely, deterministically, regardless of where the
+// cut lands.
+func TestDoRejectsAnOversizedBodyRatherThanTruncating(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// A well-formed (if empty) pulls array, padded well past
+		// maxResponseBytes with whitespace insignificant to JSON -- so if
+		// the size limit were not enforced, this would decode just fine.
+		w.Write([]byte("["))
+		w.Write([]byte(strings.Repeat(" ", maxResponseBytes+1024)))
+		w.Write([]byte("]"))
+	}))
+	defer srv.Close()
+
+	g := &GitHubProvider{BaseURL: srv.URL, Client: &http.Client{Timeout: 30 * time.Second}}
+	_, err := g.FindPR(context.Background(), "acme", "rules", "main", "somebranch")
+	if err == nil {
+		t.Fatal("FindPR succeeded against an oversized body, want an error")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error does not report the size limit was exceeded: %v", err)
 	}
 }
