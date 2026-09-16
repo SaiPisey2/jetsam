@@ -43,8 +43,14 @@ query_log:
 
 // WriteDefault writes the commented default config, refusing to overwrite
 // an existing file: a re-run of init must never discard edits.
+//
+// The file is created 0o600 (owner read/write only), not the more usual
+// 0o644: this config grows a credential in a later version (Task 11-12
+// add a GitHub token), and a config file is worth protecting from other
+// local users from the moment it exists, not only once a secret lands in
+// it.
 func WriteDefault(path string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", path, err)
 	}

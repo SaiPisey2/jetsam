@@ -25,6 +25,22 @@ func TestLoadRejectsAnEmptyURL(t *testing.T) {
 	}
 }
 
+func TestWriteDefaultCreatesAPrivateFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "jetsam.yaml")
+	if err := WriteDefault(p); err != nil {
+		t.Fatalf("WriteDefault: %v", err)
+	}
+	// This file grows a credential in a later version (a GitHub token),
+	// so it must never be world- or group-readable, from its first write.
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode = %o, want %o", got, 0o600)
+	}
+}
+
 func TestHaveQueryLogIsFalseByDefault(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "jetsam.yaml")
 	if err := WriteDefault(p); err != nil {
