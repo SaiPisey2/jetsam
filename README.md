@@ -22,7 +22,21 @@ go install github.com/SaiPisey2/jetsam/cmd/jetsam@latest
 ```
 jetsam init
 jetsam scan
+jetsam propose
 ```
+
+`propose` prints the pull request it would open -- the diff to your scrape
+config and the PR body -- and opens nothing. Add `-apply -owner OWNER -repo
+REPO` to actually open it, with a GitHub token in `$GITHUB_TOKEN`:
+
+```
+export GITHUB_TOKEN=...
+jetsam propose -apply -owner myorg -repo myrepo
+```
+
+The token is read from the environment only -- never accept it as a flag,
+since a flag value lands in `ps` output and shell history. `-apply` without
+`-owner`, `-repo`, or a token is refused before anything else runs.
 
 ## License
 

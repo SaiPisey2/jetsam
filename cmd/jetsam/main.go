@@ -6,12 +6,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	"github.com/SaiPisey2/jetsam/internal/config"
 	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/emit"
+	"github.com/SaiPisey2/jetsam/internal/forge"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
 	"github.com/SaiPisey2/jetsam/internal/promapi"
 	"github.com/SaiPisey2/jetsam/internal/report"
@@ -24,6 +26,11 @@ usage:
   jetsam init     [-config jetsam.yaml]
   jetsam scan     [-config jetsam.yaml]
   jetsam propose  [-config jetsam.yaml]
+  jetsam propose  -apply -owner OWNER -repo REPO [-base main] [-config jetsam.yaml]
+
+  -apply requires $GITHUB_TOKEN in the environment. It is never accepted as
+  a flag: a flag value lands in argv, readable by every other user on the
+  machine via ps, and in shell history.
 `
 
 func main() {
@@ -96,21 +103,77 @@ func runScan(args []string) {
 	report.Scan(os.Stdout, inv, cor, verdict.Compute(inv, cor, false))
 }
 
-// runPropose repeats the scan pipeline, then prints the pull request it
-// would open: the unified diff of the scrape config it would edit, and the
-// PR body. Nothing is written to disk and nothing reaches GitHub -- that is
-// a later command. This is a dry run, full stop.
+// runPropose is the production entry point for `jetsam propose`. It wires
+// proposeCmd to the real world: real stdio, the real environment (so
+// $GITHUB_TOKEN is read from there and nowhere else), and a real
+// forge.GitHubProvider when -apply is given.
 func runPropose(args []string) {
-	fs := flag.NewFlagSet("propose", flag.ExitOnError)
+	os.Exit(proposeCmd(args, os.Stdout, os.Stderr, os.Getenv, func(token string) forge.Provider {
+		return forge.NewGitHubProvider(token)
+	}))
+}
+
+// proposeCmd implements `jetsam propose`, with every side channel that
+// matters for testing passed in explicitly: where output goes, where the
+// environment is read from, and how a forge.Provider is built. That last
+// seam is what lets -apply be exercised end to end against
+// forge.NewFakeProvider() in a test, without the test ever constructing a
+// real GitHubProvider or touching a real repository.
+//
+// It repeats the scan pipeline, then either prints the pull request it
+// would open (a dry run: the unified diff of the scrape config it would
+// edit, and the PR body -- nothing written, nothing reaches a forge) or,
+// with -apply, actually opens it via newProvider(token).
+func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) string, newProvider func(token string) forge.Provider) int {
+	fs := flag.NewFlagSet("propose", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	path := fs.String("config", "jetsam.yaml", "config file")
-	fs.Parse(args)
+	apply := fs.Bool("apply", false, "open the pull request on GitHub instead of printing a dry run")
+	owner := fs.String("owner", "", "GitHub repository owner (required with -apply)")
+	repo := fs.String("repo", "", "GitHub repository name (required with -apply)")
+	base := fs.String("base", "main", "base branch to open the pull request against")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	logErr := func(err error) { fmt.Fprintf(stderr, "error: %v\n", err) }
+
+	// -apply is the only path that touches someone else's repository and
+	// the only one that needs a credential. Both are checked here, before
+	// the config is loaded, before Prometheus is queried, before any file
+	// is read: a run that does half the work and then fails partway is
+	// worse than one that refuses immediately.
+	//
+	// The token is read from the environment only, via getenv
+	// ($GITHUB_TOKEN in production). It is never accepted as a flag: a
+	// flag value lands in argv, readable by every other user on the
+	// machine via `ps`, and in shell history.
+	token := getenv("GITHUB_TOKEN")
+	if *apply {
+		var missing []string
+		if *owner == "" {
+			missing = append(missing, "-owner")
+		}
+		if *repo == "" {
+			missing = append(missing, "-repo")
+		}
+		if token == "" {
+			missing = append(missing, "$GITHUB_TOKEN")
+		}
+		if len(missing) > 0 {
+			logErr(fmt.Errorf("-apply requires %s", strings.Join(missing, ", ")))
+			return 1
+		}
+	}
 
 	cfg, err := config.Load(*path)
 	if err != nil {
-		fail(err)
+		logErr(err)
+		return 1
 	}
 	if cfg.PrometheusFile == "" {
-		fail(fmt.Errorf("propose requires prometheus_file to be set in %s", *path))
+		logErr(fmt.Errorf("propose requires prometheus_file to be set in %s", *path))
+		return 1
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Prometheus.Timeout)
@@ -119,11 +182,13 @@ func runPropose(args []string) {
 	cl := promapi.New(cfg.Prometheus.URL, cfg.Prometheus.Timeout)
 	counts, err := cl.TSDBStatus(ctx, cfg.Prometheus.MetricLimit)
 	if err != nil {
-		fail(err)
+		logErr(err)
+		return 1
 	}
 	rules, err := cl.AlertingAndRecordingRules(ctx)
 	if err != nil {
-		fail(err)
+		logErr(err)
+		return 1
 	}
 
 	inv := inventory.Build(counts)
@@ -147,7 +212,8 @@ func runPropose(args []string) {
 		}
 		jobs, err := cl.QueryJobsFor(ctx, v.Metric)
 		if err != nil {
-			fail(fmt.Errorf("resolve job for %s: %w", v.Metric, err))
+			logErr(fmt.Errorf("resolve job for %s: %w", v.Metric, err))
+			return 1
 		}
 		if len(jobs) == 0 {
 			// Nothing is currently exposing this metric under any job
@@ -162,40 +228,67 @@ func runPropose(args []string) {
 	}
 
 	if len(drops) == 0 {
-		fmt.Println("propose: nothing to propose.")
+		fmt.Fprintln(stdout, "propose: nothing to propose.")
 		switch {
 		case len(res.Blocked) > 0:
-			fmt.Printf("%d rule(s) could not be read; a blocked rule may reference anything, "+
+			fmt.Fprintf(stdout, "%d rule(s) could not be read; a blocked rule may reference anything, "+
 				"so every drop is withheld until it is fixed. See `jetsam scan` for which.\n", len(res.Blocked))
 		case len(unresolved) > 0:
-			fmt.Printf("%d metric(s) graded droppable have no job currently exposing them, so there is no scrape config to edit; skipped.\n", len(unresolved))
+			fmt.Fprintf(stdout, "%d metric(s) graded droppable have no job currently exposing them, so there is no scrape config to edit; skipped.\n", len(unresolved))
 		default:
-			fmt.Println("no query log is configured, so jetsam cannot tell \"no rule mentions this\" apart from " +
+			fmt.Fprintln(stdout, "no query log is configured, so jetsam cannot tell \"no rule mentions this\" apart from "+
 				"\"nobody reads this\" -- set query_log.path to make any metric eligible for a drop.")
 		}
-		fmt.Println("dry run: nothing opened. Re-run with -apply to open this PR.")
-		return
+		// Nothing droppable means nothing to commit or open, -apply
+		// included: no branch is created and no empty PR is opened.
+		fmt.Fprintln(stdout, "dry run: nothing opened. Re-run with -apply to open this PR.")
+		return 0
 	}
 
 	promYAML, err := os.ReadFile(cfg.PrometheusFile)
 	if err != nil {
-		fail(fmt.Errorf("read %s: %w", cfg.PrometheusFile, err))
+		logErr(fmt.Errorf("read %s: %w", cfg.PrometheusFile, err))
+		return 1
 	}
 	newYAML, err := emit.Render(string(promYAML), drops)
 	if err != nil {
-		fail(err)
+		logErr(err)
+		return 1
 	}
 
 	if diff := unifiedDiff(cfg.PrometheusFile, string(promYAML), newYAML); diff != "" {
-		fmt.Print(diff)
+		fmt.Fprint(stdout, diff)
 	} else {
-		fmt.Printf("(no change: %s already carries every drop rule below)\n", cfg.PrometheusFile)
+		fmt.Fprintf(stdout, "(no change: %s already carries every drop rule below)\n", cfg.PrometheusFile)
 	}
-	fmt.Println()
+	fmt.Fprintln(stdout)
 
 	title, body := emit.Body(drops, res, cor.Queries, inv.TotalSeries, cfg.Pricing.PerSeriesMonth)
-	fmt.Printf("%s\n\n%s\n\n", title, body)
-	fmt.Println("dry run: nothing opened. Re-run with -apply to open this PR.")
+	fmt.Fprintf(stdout, "%s\n\n%s\n\n", title, body)
+
+	if !*apply {
+		fmt.Fprintln(stdout, "dry run: nothing opened. Re-run with -apply to open this PR.")
+		return 0
+	}
+
+	return applyAndReport(ctx, stdout, stderr, newProvider(token), *owner, *repo, *base, cfg.PrometheusFile, string(promYAML), newYAML, title, body)
+}
+
+// applyAndReport calls emit.Apply through p and reports the outcome: the
+// opened (or found) PR's state and URL on stdout, or the error on stderr.
+// It is everything -apply does once there is something to propose,
+// factored out so it can be driven straight against
+// forge.NewFakeProvider() in a test without a real scan first -- and
+// notably, it never takes a token: by the time p exists, authentication is
+// already p's own business (see the comment on emit.Apply).
+func applyAndReport(ctx context.Context, stdout, stderr io.Writer, p forge.Provider, owner, repo, base, path, oldYAML, newYAML, title, body string) int {
+	pr, err := emit.Apply(ctx, p, owner, repo, base, path, oldYAML, newYAML, title, body)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s: %s\n", pr.State, pr.URL)
+	return 0
 }
 
 // diffContext is how many unchanged lines surround a change in the
