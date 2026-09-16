@@ -22,6 +22,12 @@ type Config struct {
 	QueryLog struct {
 		Path string `yaml:"path"`
 	} `yaml:"query_log"`
+	// PrometheusFile is the path, inside a git checkout, of the scrape
+	// config to edit. propose refuses to run without it.
+	PrometheusFile string `yaml:"prometheus_file"`
+	Pricing        struct {
+		PerSeriesMonth float64 `yaml:"per_series_month"`
+	} `yaml:"pricing"`
 }
 
 const defaultYAML = `prometheus:
@@ -39,6 +45,16 @@ const defaultYAML = `prometheus:
 # them eligible.
 query_log:
   path: ""
+
+# Required by "jetsam propose". Path, inside a git checkout, of the scrape
+# config propose edits to add the drop rules it proposes.
+prometheus_file: ""
+
+# Optional. Without a configured rate, the proposed pull request states no
+# cost -- there is no honest universal price for a series across Grafana
+# Cloud, self-hosted Mimir, or VictoriaMetrics.
+pricing:
+  per_series_month: 0
 `
 
 // WriteDefault writes the commented default config, refusing to overwrite
