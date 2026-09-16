@@ -2,6 +2,7 @@
 package emit
 
 import (
+	"bytes"
 	"fmt"
 	"regexp"
 	"sort"
@@ -43,6 +44,22 @@ type Drop struct {
 // own prior output -- as happens across repeated scans of an evolving repo
 // -- produces byte-identical output rather than growing the file on every
 // run. See appendDrops for exactly what counts as equivalent.
+//
+// Render changes only the lines it adds. The encoder is configured with
+// SetIndent(2) -- yaml.Marshal's own default is 4, which does not match
+// the file it just parsed and would reformat every untouched line of a
+// conventionally-written prometheus.yml, burying the actual change inside
+// a whole-file diff nobody would review. This is not a guarantee for every
+// possible input, though: a file already indented at some width other than
+// 2 (4-space, tabs) is reformatted to 2-space on output, because yaml.v3's
+// node tree does not record the original indent width, only structure and
+// comments. Two more shapes are lost for the same reason -- the node tree
+// keeps comment text but not layout around it: blank lines between nodes
+// are dropped, and an inline "# comment" with more than one space before
+// the "#" is renormalized to exactly one space. A prometheus.yml written
+// in the ordinary 2-space style with single-space inline comments -- the
+// near-universal Prometheus and general YAML convention -- round-trips
+// with only the added lines changed.
 func Render(promYAML string, drops []Drop) (string, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal([]byte(promYAML), &doc); err != nil {
@@ -93,11 +110,16 @@ func Render(promYAML string, drops []Drop) (string, error) {
 		}
 	}
 
-	out, err := yaml.Marshal(&doc)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
 		return "", fmt.Errorf("render prometheus.yml: %w", err)
 	}
-	return string(out), nil
+	if err := enc.Close(); err != nil {
+		return "", fmt.Errorf("render prometheus.yml: %w", err)
+	}
+	return buf.String(), nil
 }
 
 // appendDrops adds one drop rule per metric to sc's metric_relabel_configs,

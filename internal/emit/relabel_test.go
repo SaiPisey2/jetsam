@@ -287,6 +287,122 @@ func TestRenderCollapsesDuplicateDropsInOneCall(t *testing.T) {
 	}
 }
 
+// sampleYAMLManyStyles exercises, in one document, the styles a real
+// prometheus.yml mixes: a 2-space indented block sequence, a flow-style
+// mapping/sequence value, a single-quoted string and a double-quoted
+// string, a comment above a job, an inline comment after a value, a
+// comment inside a list, and a multi-line block scalar regex (unusual but
+// legal). Two jobs are present; only "api" receives a drop in the tests
+// below, so "grafana" is the sharpest signal available for reformatting:
+// nothing about it changes at all.
+const sampleYAMLManyStyles = `global:
+  scrape_interval: 15s
+scrape_configs:
+  # the API tier, owned by the platform team
+  - job_name: api
+    static_configs:
+      - targets: ['localhost:9100']
+    relabel_configs:
+      # rewrite the instance label before scraping
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: "static-instance"
+        action: replace
+  - job_name: grafana
+    static_configs: [{targets: ['localhost:3000']}]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "grafana_build_info" # already dropped by hand
+        action: drop
+      - source_labels: [__name__]
+        regex: |
+          grafana_(request|response)_duration_seconds
+        action: keep
+`
+
+// linesOf splits s into lines without a trailing empty element from a
+// final newline, so line counts and indices line up with what a human
+// reading the file would call "line 1", "line 2", etc.
+func linesOf(s string) []string {
+	return strings.Split(strings.TrimRight(s, "\n"), "\n")
+}
+
+// assertOnlyAdditions checks that every line of input appears, verbatim
+// and in the same relative order, somewhere in output -- i.e. input's
+// lines are a subsequence of output's lines. It does not require input's
+// lines to be contiguous in output: Render is allowed to insert new lines
+// between them (that is the whole point), but every line already there,
+// including its exact leading whitespace, must survive unmodified and
+// unremoved.
+func assertOnlyAdditions(t *testing.T, input, output string) {
+	t.Helper()
+	in := linesOf(input)
+	out := linesOf(output)
+	j := 0
+	for i, want := range in {
+		for j < len(out) && out[j] != want {
+			j++
+		}
+		if j == len(out) {
+			t.Fatalf("input line %d was changed or removed -- not found unchanged and in order in the output\nmissing line: %q\n\n--- input ---\n%s\n\n--- output ---\n%s",
+				i+1, want, input, output)
+		}
+		j++
+	}
+}
+
+// TestRenderChangesOnlyTheLinesItAdds is the sharp regression test for
+// whole-file reformatting: it renders a drop into exactly one of two jobs
+// and asserts every line of the original file -- 2-space sequences, flow
+// style, both quote styles, all three comment positions, and a multi-line
+// block scalar -- still appears, unchanged and in order, in the output.
+// The untouched "grafana" job is the strongest signal: nothing under it
+// should differ from the input at all.
+func TestRenderChangesOnlyTheLinesItAdds(t *testing.T) {
+	got, err := Render(sampleYAMLManyStyles, []Drop{{Metric: "go_gc_duration_seconds", Series: 1, Job: "api"}})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	assertOnlyAdditions(t, sampleYAMLManyStyles, got)
+
+	// The untouched job's own rendered form should be byte-identical to
+	// what it looked like before -- not just "present as a subsequence" --
+	// since nothing added a line inside it.
+	grafanaIn := sampleYAMLManyStyles[strings.Index(sampleYAMLManyStyles, "job_name: grafana"):]
+	grafanaOut := got[strings.Index(got, "job_name: grafana"):]
+	if grafanaOut != grafanaIn {
+		t.Errorf("untouched job grafana was reformatted:\n--- before ---\n%s\n--- after ---\n%s", grafanaIn, grafanaOut)
+	}
+}
+
+// TestRenderTwiceOnManyStylesIsByteIdentical re-confirms the idempotence
+// property established earlier still holds once the encoder is configured
+// explicitly (SetIndent(2)) rather than left at yaml.Marshal's default.
+func TestRenderTwiceOnManyStylesIsByteIdentical(t *testing.T) {
+	drop := []Drop{{Metric: "go_gc_duration_seconds", Series: 1, Job: "api"}}
+	a, err := Render(sampleYAMLManyStyles, drop)
+	if err != nil {
+		t.Fatalf("Render (first): %v", err)
+	}
+	b, err := Render(sampleYAMLManyStyles, drop)
+	if err != nil {
+		t.Fatalf("Render (second): %v", err)
+	}
+	if a != b {
+		t.Fatalf("two renders of the same many-styles input differ:\na:\n%s\nb:\n%s", a, b)
+	}
+	// And rendering the same drop into Render's own prior output must
+	// still not grow the rule count (idempotence survives the encoder
+	// change too).
+	again, err := Render(a, drop)
+	if err != nil {
+		t.Fatalf("Render (against own output): %v", err)
+	}
+	if n := ruleCount(t, again, "api"); n != 1 {
+		t.Fatalf("re-rendering against own output produced %d rules under job api, want 1", n)
+	}
+}
+
 // findRegex walks the rendered YAML and returns the regex: value of the
 // metric_relabel_configs entry for job/metric-index i (0-based, in document
 // order under that job). It fails the test if the structure it expects is
