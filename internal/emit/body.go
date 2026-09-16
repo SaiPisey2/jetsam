@@ -11,32 +11,63 @@ import (
 
 // mdText renders a remote-sourced string (a metric name, a job name, or a
 // blocked-query description) for embedding in a pull request body that a
-// Markdown renderer will parse.
+// Markdown renderer will parse. Every one of these strings is untrusted:
+// anyone who can expose a metric to a scraped target, or name a rule that
+// ends up in Blocked, controls what lands here, and this body's whole
+// purpose is to be an approval surface a human reads before permanently
+// deleting monitoring data. A metric name that renders as a live link or a
+// tracking beacon in that surface is a phishing vector, not a cosmetic bug.
 //
 // safe.Text handles the first problem: a control character -- an ANSI
 // escape, a bare CR/LF, a tab -- is rendered as its visible escape sequence
-// instead of executing in a terminal or, here, forging a line break inside
-// what is meant to be one Markdown table row.
+// instead of executing in a terminal or forging a line break inside what is
+// meant to be one Markdown table row.
 //
-// Markdown adds a second problem safe.Text does not touch. This body never
-// wraps a remote-sourced string in backticks -- unlike a naive `%s` inline
-// code span, plain text cannot be broken out of, because there is no
-// delimiter of ours for an embedded backtick to pair with. A literal
-// backtick in the input is still backslash-escaped anyway, defensively: two
-// backticks in the same table row (this metric's and some other field's)
-// could otherwise pair up across cells and swallow whatever sits between
-// them, "|" included, once a Markdown table parser resolves code spans
-// before splitting a row on "|". A literal pipe is escaped for the more
-// direct reason that it is the table's own column separator.
+// Markdown and GitHub's raw-HTML pass-through add every other problem
+// safe.Text does not touch, so mdText neutralises each construct that turns
+// plain text into something that renders as structure rather than content:
 //
-// Order matters: backslashes are escaped first, so a backslash already
-// escaping a "|" or a backtick can never be produced by this function's own
-// escaping and then re-interpreted as escaping something else.
+//   - "|" is escaped because it is the table's own column separator.
+//   - "`" is escaped defensively. This body never wraps a remote-sourced
+//     string in backticks -- unlike a naive `%s` inline code span, plain
+//     text cannot be broken out of, because there is no delimiter of ours
+//     for an embedded backtick to pair with. But two backticks in the same
+//     table row (this field's and some other field's) could still pair up
+//     across cells and swallow whatever sits between them, "|" included,
+//     once a Markdown table parser resolves code spans before splitting a
+//     row on "|" -- so a literal backtick is escaped anyway.
+//   - "[", "]", "(", ")" and "!" are escaped so link and image syntax --
+//     "[text](url)" or "![alt](url)" -- can never form. An unescaped image
+//     renders as a live, unprompted GET request (a tracking beacon); an
+//     unescaped link renders as something a reviewer can click without
+//     ever seeing the URL as text.
+//   - "<" and ">" are rendered as the HTML entities "&lt;"/"&gt;" rather
+//     than backslash-escaped. GitHub's Markdown renders raw HTML that
+//     survives inline parsing, so a script tag, a forged `</td><td>`, or an
+//     HTML comment hiding real content is a structural break, not just a
+//     display glitch. A backslash escape ("\<") depends on every renderer
+//     in this body's path doing CommonMark-correct backslash-escape
+//     processing before HTML-tag recognition; an entity reference does not
+//     depend on that at all; it is inert text at the point angle brackets
+//     would otherwise start being read as a tag; that holds regardless of
+//     what parses this Markdown next.
+//
+// Order matters throughout: backslashes are escaped first, so a backslash
+// already escaping one of these characters can never be produced by this
+// function's own escaping and then re-interpreted as escaping something
+// else.
 func mdText(s string) string {
 	s = safe.Text(s)
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, "|", `\|`)
 	s = strings.ReplaceAll(s, "`", "\\`")
+	s = strings.ReplaceAll(s, "[", `\[`)
+	s = strings.ReplaceAll(s, "]", `\]`)
+	s = strings.ReplaceAll(s, "(", `\(`)
+	s = strings.ReplaceAll(s, ")", `\)`)
+	s = strings.ReplaceAll(s, "!", `\!`)
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
 	return s
 }
 

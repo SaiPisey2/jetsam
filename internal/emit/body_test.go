@@ -1,6 +1,7 @@
 package emit
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -119,5 +120,94 @@ func TestBodyEscapesBlockedEntries(t *testing.T) {
 	_, body := Body(nil, res, 200, 1000, 0)
 	if strings.ContainsRune(body, 0x1b) {
 		t.Errorf("raw ESC byte survived from a blocked entry into the body:\n%q", body)
+	}
+}
+
+// --- Markdown/HTML injection: a metric name, job name or blocked-query
+// description can carry link, image and raw-HTML syntax. Anyone who can
+// expose a metric on a scraped target controls this string, and a human
+// reads this body to decide whether to permanently delete monitoring
+// data -- so a phishing link or a tracking beacon must never render live.
+
+// mdInjectionShapes are the concrete payloads a reviewer confirmed render
+// as live Markdown/HTML today against an unpatched mdText: a clickable
+// link, an image (a beacon: rendering it alone fires a GET request), a
+// forged table cell close/open, a script tag, an HTML comment, a
+// reference-style link, an image with an onerror handler, and a bare "<"
+// and ">" (either could start or end a tag once other characters around it
+// cooperate).
+var mdInjectionShapes = []string{
+	"[click me](http://evil.example/steal)",
+	"![](http://evil.example/beacon.png)",
+	"</td><td>forged",
+	"<script>alert(1)</script>",
+	"<!-- hidden -->",
+	"[x][y]",
+	"<img src=x onerror=alert(1)>",
+	"<",
+	">",
+}
+
+// assertNoLiveMarkupOrHTML checks the RENDERED body, not the input: a live
+// link, an image, a script tag, a forged closing/opening tag pair, or an
+// HTML comment must not appear literally in the output, and the drop
+// table's row count must be exactly what one drop plus a header and
+// separator produce -- neither more (a forged row) nor fewer (swallowed
+// content).
+func assertNoLiveMarkupOrHTML(t *testing.T, shape, body string) {
+	t.Helper()
+	for _, bad := range []string{"](http", "<script", "</", "<!--", "<img"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("shape %q: body contains unneutralised %q:\n%s", shape, bad, body)
+		}
+	}
+	if got, want := countTableRows(body), 3; got != want {
+		t.Errorf("shape %q: table rows = %d, want %d (injection changed table structure):\n%s", shape, got, want, body)
+	}
+}
+
+// subtestName turns shape into a readable, slash-free subtest name: several
+// of the payloads above contain "/", which Go's testing package would
+// otherwise read as a subtest hierarchy separator.
+func subtestName(i int, shape string) string {
+	clean := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		default:
+			return -1
+		}
+	}, shape)
+	return fmt.Sprintf("%02d_%s", i, clean)
+}
+
+func TestBodyNeutralisesMarkdownAndHTMLInMetricName(t *testing.T) {
+	for i, shape := range mdInjectionShapes {
+		t.Run(subtestName(i, shape), func(t *testing.T) {
+			drops := []Drop{{Metric: shape, Series: 5, Job: "api"}}
+			_, body := Body(drops, verdict.Result{}, 200, 1000, 0)
+			assertNoLiveMarkupOrHTML(t, shape, body)
+		})
+	}
+}
+
+func TestBodyNeutralisesMarkdownAndHTMLInJobName(t *testing.T) {
+	for i, shape := range mdInjectionShapes {
+		t.Run(subtestName(i, shape), func(t *testing.T) {
+			drops := []Drop{{Metric: "x", Series: 5, Job: shape}}
+			_, body := Body(drops, verdict.Result{}, 200, 1000, 0)
+			assertNoLiveMarkupOrHTML(t, shape, body)
+		})
+	}
+}
+
+func TestBodyNeutralisesMarkdownAndHTMLInBlockedEntries(t *testing.T) {
+	for i, shape := range mdInjectionShapes {
+		t.Run(subtestName(i, shape), func(t *testing.T) {
+			drops := []Drop{{Metric: "x", Series: 5, Job: "api"}}
+			res := verdict.Result{Blocked: []string{shape}}
+			_, body := Body(drops, res, 200, 1000, 0)
+			assertNoLiveMarkupOrHTML(t, shape, body)
+		})
 	}
 }
