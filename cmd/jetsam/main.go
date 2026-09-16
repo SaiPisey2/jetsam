@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/SaiPisey2/jetsam/internal/config"
 	"github.com/SaiPisey2/jetsam/internal/corpus"
@@ -474,7 +475,25 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 		return 0
 	}
 
-	return applyAndReport(ctx, stdout, stderr, newProvider(token), *owner, *repo, *base, cfg.PrometheusFile, string(promYAML), newYAML, title, body)
+	// The forge phase (EnsureBranch, CommitFiles, OpenPR) gets its own
+	// context, sized for a GitHub write rather than a Prometheus read, and
+	// started fresh here rather than reusing ctx -- which was sized by
+	// cfg.Prometheus.Timeout and has already been spent on TSDBStatus and
+	// AlertingAndRecordingRules. Sharing it would mean a Prometheus-sized
+	// deadline could expire between CommitFiles and OpenPR: the branch
+	// would then hold jetsam's commit but no PR would exist, and the next
+	// run's FindPR returns nil (nothing to reuse), EnsureBranch correctly
+	// refuses to reset a branch that might carry a human's own push, and
+	// CommitFiles refuses forever because the branch blob no longer
+	// matches BaseContent -- with an error telling the operator to
+	// "re-run against a fresh checkout", which cannot actually help.
+	// GitHubProvider already applies its own 30s-per-request timeout on
+	// top of this; 5 minutes is comfortably above what EnsureBranch,
+	// CommitFiles and OpenPR need together even under retries.
+	forgeCtx, forgeCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer forgeCancel()
+
+	return applyAndReport(forgeCtx, stdout, stderr, newProvider(token), *owner, *repo, *base, cfg.PrometheusFile, string(promYAML), newYAML, title, body)
 }
 
 // eligibleForDrop reports whether v should be treated as droppable for this
