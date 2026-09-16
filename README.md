@@ -38,6 +38,15 @@ The token is read from the environment only -- never accept it as a flag,
 since a flag value lands in `ps` output and shell history. `-apply` without
 `-owner`, `-repo`, or a token is refused before anything else runs.
 
+By default `propose` only ever proposes a metric backed by real evidence
+that nothing reads it, which in v0.1 (no query log support yet) means it
+proposes nothing at all. Pass `-include-unreferenced` to also propose
+metrics no rule references, on faith rather than evidence -- jetsam cannot
+see ad-hoc or Grafana Explore queries against them. The PR body states
+which grade every drop rests on and carries an extra warning wherever that
+grade is `unreferenced`; a non-empty set of unreadable rules still forbids
+every drop regardless of this flag.
+
 ## License
 
 Apache 2.0.

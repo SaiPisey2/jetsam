@@ -77,12 +77,31 @@ func mdText(s string) string {
 // series, self-hosted Mimir costs disk and RAM, VictoriaMetrics differs
 // again -- and inventing one would be the least checkable number in the
 // whole report.
+//
+// res.Verdicts is also where each drop's evidence grade comes from: the
+// spec requires the body to state which grade every drop rests on, not
+// just that it is droppable, because "unreferenced" (no rule names it, but
+// jetsam cannot see ad-hoc or Explore queries) and "unqueried" (a query log
+// covered the window too) carry very different confidence, and a drop
+// proposed on the weaker grade needs a warning of its own, alongside -- not
+// instead of -- the irreversibility one.
 func Body(drops []Drop, res verdict.Result, queries, totalSeries int, perSeriesMonth float64) (string, string) {
 	total := 0
 	for _, d := range drops {
 		total += d.Series
 	}
 	title := fmt.Sprintf("jetsam: stop storing %d unread series", total)
+
+	gradeOf := make(map[string]verdict.Grade, len(res.Verdicts))
+	for _, v := range res.Verdicts {
+		gradeOf[v.Metric] = v.Grade
+	}
+	unreferenced := map[string]bool{}
+	for _, d := range drops {
+		if gradeOf[d.Metric] == verdict.GradeUnreferenced {
+			unreferenced[d.Metric] = true
+		}
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "## jetsam: %d series nothing reads\n\n", total)
@@ -96,6 +115,13 @@ func Body(drops []Drop, res verdict.Result, queries, totalSeries int, perSeriesM
 	b.WriteString("> [!WARNING]\n")
 	b.WriteString("> **Reverting this PR restores collection, not history.** Series not written " +
 		"while these rules are live cannot be recovered afterwards. Everything else here is reversible; this is not.\n\n")
+
+	if len(unreferenced) > 0 {
+		fmt.Fprintf(&b, "> [!WARNING]\n> **%d metric(s) below rest on \"unreferenced\" grade, not \"unqueried\".** "+
+			"They are not referenced by any rule, but jetsam has no query log configured and therefore cannot see "+
+			"ad-hoc or Grafana Explore queries against them. `-include-unreferenced` was passed, and the operator "+
+			"who ran it has chosen to accept that risk.\n\n", len(unreferenced))
+	}
 
 	if total > 0 && totalSeries > 0 {
 		fmt.Fprintf(&b, "Drops %d series -- %.1f%% of what this Prometheus stores.\n", total, 100*float64(total)/float64(totalSeries))
@@ -119,11 +145,14 @@ func Body(drops []Drop, res verdict.Result, queries, totalSeries int, perSeriesM
 	}
 	sort.Strings(jobs)
 	for _, j := range jobs {
-		fmt.Fprintf(&b, "### job \"%s\"\n\n| metric | series |\n| --- | --- |\n", mdText(j))
+		fmt.Fprintf(&b, "### job \"%s\"\n\n| metric | series | grade |\n| --- | --- | --- |\n", mdText(j))
 		ds := byJob[j]
 		sort.Slice(ds, func(a, c int) bool { return ds[a].Series > ds[c].Series })
 		for _, d := range ds {
-			fmt.Fprintf(&b, "| %s | %d |\n", mdText(d.Metric), d.Series)
+			// The grade string itself ("used"/"unreferenced"/"unqueried") is
+			// one of verdict's own constants, not remote-sourced, so it does
+			// not need mdText -- unlike the metric name next to it.
+			fmt.Fprintf(&b, "| %s | %d | %s |\n", mdText(d.Metric), d.Series, gradeOf[d.Metric])
 		}
 		b.WriteString("\n")
 	}

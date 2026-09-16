@@ -115,6 +115,38 @@ func TestBodyRendersNewlineInMetricNameVisibly(t *testing.T) {
 	}
 }
 
+// TestBodyStatesTheGradeADropRestsOn pins the spec requirement that the
+// body says which grade each drop rests on, and carries a distinct warning
+// -- next to, not instead of, the irreversibility one -- when that grade is
+// "unreferenced": no rule names the metric, but jetsam has no query log and
+// so cannot see ad-hoc or Grafana Explore reads of it.
+func TestBodyStatesTheGradeADropRestsOn(t *testing.T) {
+	res := verdict.Result{Verdicts: []verdict.Verdict{
+		{Metric: "x", Series: 10, Grade: verdict.GradeUnreferenced, Droppable: true},
+	}}
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, 200, 1000, 0)
+
+	if !strings.Contains(body, "unreferenced") {
+		t.Errorf("body does not state the grade the drop rests on:\n%s", body)
+	}
+	if !strings.Contains(body, "-include-unreferenced") {
+		t.Errorf("body does not warn that -include-unreferenced was needed to propose this drop:\n%s", body)
+	}
+	if !strings.Contains(body, "cannot be recovered") {
+		t.Errorf("the unreferenced-grade warning must not replace the irreversibility warning:\n%s", body)
+	}
+}
+
+func TestBodyDoesNotWarnAboutUnreferencedWhenEveryDropIsFullyEvidenced(t *testing.T) {
+	res := verdict.Result{Verdicts: []verdict.Verdict{
+		{Metric: "x", Series: 10, Grade: verdict.GradeUnqueried, Droppable: true},
+	}}
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, 200, 1000, 0)
+	if strings.Contains(body, "-include-unreferenced") {
+		t.Errorf("body warns about -include-unreferenced although every drop rests on unqueried grade:\n%s", body)
+	}
+}
+
 func TestBodyEscapesBlockedEntries(t *testing.T) {
 	res := verdict.Result{Blocked: []string{"rule g/Broken\x1b[31m: parse query"}}
 	_, body := Body(nil, res, 200, 1000, 0)

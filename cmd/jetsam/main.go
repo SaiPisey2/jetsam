@@ -25,12 +25,16 @@ const usage = `jetsam finds Prometheus metrics nothing reads.
 usage:
   jetsam init     [-config jetsam.yaml]
   jetsam scan     [-config jetsam.yaml]
-  jetsam propose  [-config jetsam.yaml]
-  jetsam propose  -apply -owner OWNER -repo REPO [-base main] [-config jetsam.yaml]
+  jetsam propose  [-include-unreferenced] [-config jetsam.yaml]
+  jetsam propose  -apply -owner OWNER -repo REPO [-base main] [-include-unreferenced] [-config jetsam.yaml]
 
   -apply requires $GITHUB_TOKEN in the environment. It is never accepted as
   a flag: a flag value lands in argv, readable by every other user on the
   machine via ps, and in shell history.
+
+  -include-unreferenced proposes dropping metrics no rule references even
+  though jetsam has no query log confirming nobody reads them. Without it
+  (the default), an install with no query log configured proposes nothing.
 `
 
 func main() {
@@ -132,6 +136,15 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	owner := fs.String("owner", "", "GitHub repository owner (required with -apply)")
 	repo := fs.String("repo", "", "GitHub repository name (required with -apply)")
 	base := fs.String("base", "main", "base branch to open the pull request against")
+	// includeUnreferenced widens what propose treats as droppable beyond
+	// what verdict.Compute itself decided. verdict.Compute never sets this
+	// on its own -- see the spec's evidence-grade split -- because "no rule
+	// reads it" and "nobody reads it" are different claims, and only the
+	// second is backed by evidence in v0.1 (no query log). Left at its
+	// default of false, an install with no query log configured proposes
+	// nothing at all through the real CLI, by design.
+	includeUnreferenced := fs.Bool("include-unreferenced", false,
+		"propose dropping metrics no rule references, even though jetsam has no query log confirming nobody reads them (the operator accepts that risk)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -203,11 +216,13 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	// install this means propose finds nothing droppable and says so below,
 	// rather than silently deleting data on rule evidence.
 	res := verdict.Compute(inv, cor, false)
+	blocked := len(res.Blocked) > 0
 
 	var drops []emit.Drop
 	var unresolved []string
+	unreferenced := map[string]bool{}
 	for _, v := range res.Verdicts {
-		if !v.Droppable {
+		if !eligibleForDrop(v, blocked, *includeUnreferenced) {
 			continue
 		}
 		jobs, err := cl.QueryJobsFor(ctx, v.Metric)
@@ -222,6 +237,9 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 			unresolved = append(unresolved, v.Metric)
 			continue
 		}
+		if v.Grade == verdict.GradeUnreferenced {
+			unreferenced[v.Metric] = true
+		}
 		for _, j := range jobs {
 			drops = append(drops, emit.Drop{Metric: v.Metric, Series: v.Series, Job: j})
 		}
@@ -230,19 +248,32 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	if len(drops) == 0 {
 		fmt.Fprintln(stdout, "propose: nothing to propose.")
 		switch {
-		case len(res.Blocked) > 0:
+		case blocked:
 			fmt.Fprintf(stdout, "%d rule(s) could not be read; a blocked rule may reference anything, "+
 				"so every drop is withheld until it is fixed. See `jetsam scan` for which.\n", len(res.Blocked))
 		case len(unresolved) > 0:
 			fmt.Fprintf(stdout, "%d metric(s) graded droppable have no job currently exposing them, so there is no scrape config to edit; skipped.\n", len(unresolved))
+		case *includeUnreferenced:
+			fmt.Fprintln(stdout, "-include-unreferenced is set, but no rule-unreferenced metric was found either -- "+
+				"there is nothing to widen the proposal with.")
 		default:
 			fmt.Fprintln(stdout, "no query log is configured, so jetsam cannot tell \"no rule mentions this\" apart from "+
-				"\"nobody reads this\" -- set query_log.path to make any metric eligible for a drop.")
+				"\"nobody reads this\" -- set query_log.path to make a metric eligible on evidence, or pass "+
+				"-include-unreferenced to propose dropping rule-unreferenced metrics on faith instead.")
 		}
 		// Nothing droppable means nothing to commit or open, -apply
 		// included: no branch is created and no empty PR is opened.
 		fmt.Fprintln(stdout, "dry run: nothing opened. Re-run with -apply to open this PR.")
 		return 0
+	}
+
+	if len(unreferenced) > 0 {
+		// The same fact the PR body states, said here too: a dry run must
+		// not need the body read in full to know a drop rests on faith
+		// rather than evidence.
+		fmt.Fprintf(stdout, "-include-unreferenced is set: %d metric(s) below are not referenced by any rule, but "+
+			"jetsam has no query log and therefore cannot see ad-hoc or Grafana Explore queries against them. "+
+			"You have accepted that risk.\n\n", len(unreferenced))
 	}
 
 	promYAML, err := os.ReadFile(cfg.PrometheusFile)
@@ -272,6 +303,29 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	}
 
 	return applyAndReport(ctx, stdout, stderr, newProvider(token), *owner, *repo, *base, cfg.PrometheusFile, string(promYAML), newYAML, title, body)
+}
+
+// eligibleForDrop reports whether v should be treated as droppable for this
+// run of propose. verdict.Compute already decided v.Droppable under
+// whatever evidence it had -- a query log, when there is one, which v0.1
+// never wires in, so v.Droppable is always false here on its own. This
+// function only ever WIDENS that decision, and only for the one grade an
+// operator can explicitly choose to accept without that evidence:
+// GradeUnreferenced, when includeUnreferenced was passed.
+//
+// It never widens a GradeUsed verdict -- a rule reads the metric, or a
+// recording rule writes it -- because that grade means something read it,
+// not merely that jetsam lacks proof nothing did; -include-unreferenced is
+// about accepting a gap in evidence, not overriding evidence that exists.
+// And it never widens anything at all once blocked is true: an unreadable
+// query might reference anything, the same reason verdict.Compute itself
+// withholds every drop in that case, and this flag does not get to
+// override it.
+func eligibleForDrop(v verdict.Verdict, blocked, includeUnreferenced bool) bool {
+	if v.Droppable {
+		return true
+	}
+	return includeUnreferenced && !blocked && v.Grade == verdict.GradeUnreferenced
 }
 
 // applyAndReport calls emit.Apply through p and reports the outcome: the
