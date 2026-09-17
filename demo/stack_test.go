@@ -146,3 +146,67 @@ func TestGrafanaServesBothDashboards(t *testing.T) {
 		}
 	}
 }
+
+// queriedMetrics are the metrics demo/query.sh deliberately reads. A
+// metric in this list must grade as queried once sub-project B ingests
+// the log; a metric absent from it must not.
+var queriedMetrics = []string{
+	"node_cpu_seconds_total",
+	"node_memory_MemAvailable_bytes",
+	"jetsam_demo_requests_total",
+}
+
+// TestQueryLogCapturesTheKnownQueries proves the second seam sub-project
+// B depends on: that the query log exists on the HOST (prometheus writes
+// it inside its container) and that its contents are knowable.
+//
+// It also records what else lands there. Prometheus logs more than API
+// queries, and B has to tell a human's read apart from the server's own
+// rule evaluation -- a distinction that is invisible until you look at a
+// real log, which is why this test prints the breakdown rather than only
+// asserting.
+func TestQueryLogCapturesTheKnownQueries(t *testing.T) {
+	data, err := os.ReadFile("querylog/queries.log")
+	if err != nil {
+		t.Fatalf("no query log, run `make demo-up`: %v", err)
+	}
+	var apiQueries, ruleQueries int
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var entry struct {
+			Params struct {
+				Query string `json:"query"`
+			} `json:"params"`
+			RuleGroup *struct {
+				Name string `json:"name"`
+			} `json:"ruleGroup"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("query log line is not JSON: %q: %v", line, err)
+		}
+		if entry.RuleGroup != nil {
+			ruleQueries++
+			continue
+		}
+		apiQueries++
+		for _, m := range queriedMetrics {
+			if strings.Contains(entry.Params.Query, m) {
+				seen[m] = true
+			}
+		}
+	}
+	t.Logf("query log: %d API queries, %d rule evaluations", apiQueries, ruleQueries)
+
+	for _, m := range queriedMetrics {
+		if !seen[m] {
+			t.Errorf("query log does not contain a read of %s -- did demo/query.sh run?", m)
+		}
+	}
+	if ruleQueries == 0 {
+		t.Log("NOTE: no rule evaluations appear in the log. Sub-project B can treat every " +
+			"entry as a real read; record this in VENDOR.md.")
+	}
+}
