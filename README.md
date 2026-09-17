@@ -2,7 +2,7 @@
 
 Finds the Prometheus metrics nothing reads, and proposes dropping them.
 
-v0.1.0 -- see Limits for what it cannot see yet.
+v0.1.1 -- see Limits for what it cannot see yet.
 
 Prometheus tells you how many series each metric has. Your rules tell you
 which metrics anything actually queries. jetsam joins the two and opens a
