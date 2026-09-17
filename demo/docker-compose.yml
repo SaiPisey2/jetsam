@@ -24,5 +24,19 @@ services:
     ports: ["9090:9090"]
     depends_on: [loadgen, node-exporter]
 
+  grafana:
+    image: grafana/grafana:12.3.0@sha256:70d9599b186ce287be0d2c5ba9a78acb2e86c1a68c9c41449454d0fc3eeb84e8
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Nothing here is reachable from outside the host, and the stack is
+      # torn down with `make demo-down`. Do not copy this anywhere real.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
 volumes:
   promdata:

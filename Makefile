@@ -13,6 +13,7 @@ demo-up:
 	docker-compose -f demo/docker-compose.yml build
 	docker-compose -f demo/docker-compose.yml up -d
 	docker-compose -f demo/docker-compose.yml ps
+	bash demo/grafana/token.sh
 	@echo "prometheus http://localhost:9090"
 	@echo "grafana    http://localhost:3000"
 

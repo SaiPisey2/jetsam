@@ -5,6 +5,8 @@ package demo
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -105,5 +107,42 @@ func TestLoadgenExposesItsExactCardinality(t *testing.T) {
 	}
 	if got := body.Data.Result[0].Value[1]; got != "400" {
 		t.Errorf("jetsam_demo_requests_total has %v series, want exactly 400", got)
+	}
+}
+
+// TestGrafanaServesBothDashboards proves the seam sub-project B depends
+// on: a Grafana that is not merely running but reachable with a token and
+// actually serving the dashboards that make up the corpus.
+func TestGrafanaServesBothDashboards(t *testing.T) {
+	token, err := os.ReadFile("grafana/.token")
+	if err != nil {
+		t.Fatalf("no grafana token, run `make demo-up`: %v", err)
+	}
+	req, _ := http.NewRequest("GET", "http://localhost:3000/api/search?type=dash-db", nil)
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("grafana unreachable, run `make demo-up`: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /api/search: status %d -- is the service account token valid?", resp.StatusCode)
+	}
+	var found []struct {
+		Title string `json:"title"`
+		UID   string `json:"uid"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&found); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	titles := map[string]bool{}
+	for _, d := range found {
+		titles[d.Title] = true
+	}
+	for _, want := range []string{"Node Exporter Full", "loadgen"} {
+		if !titles[want] {
+			t.Errorf("dashboard %q is not provisioned (found: %v)", want, titles)
+		}
 	}
 }

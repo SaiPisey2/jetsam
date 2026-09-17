@@ -1,0 +1,18 @@
+{
+  "uid": "loadgen",
+  "title": "loadgen",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "requests by path",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (path) (rate(jetsam_demo_requests_total[5m]))"
+        }
+      ]
+    }
+  ]
+}
