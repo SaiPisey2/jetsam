@@ -14,7 +14,19 @@ test:
 # Build and start are separate steps on purpose: `up -d --build` can hang
 # with containers stuck in Created, which shows up as an indefinite wait
 # rather than a build error.
+#
+# demo/querylog is bind-mounted into the prometheus container so the host
+# (and later, jetsam itself) can read the query log back out. It is
+# gitignored, so a fresh checkout does not have it, and Docker would create
+# it itself on first use -- owned by root, since dockerd runs as root --
+# while prom/prometheus runs as the unprivileged `nobody` user and cannot
+# write into a root-owned directory. Create it ourselves, world-writable,
+# before the stack starts. 777 is fine here only because this is a
+# gitignored scratch directory in a local test fixture with nothing
+# sensitive in it; it is not a pattern to reuse anywhere that matters.
 demo-up:
+	mkdir -p demo/querylog
+	chmod 777 demo/querylog
 	$(COMPOSE) -f demo/docker-compose.yml build
 	$(COMPOSE) -f demo/docker-compose.yml up -d
 	$(COMPOSE) -f demo/docker-compose.yml ps
