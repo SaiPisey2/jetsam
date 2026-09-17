@@ -147,13 +147,16 @@ func TestGrafanaServesBothDashboards(t *testing.T) {
 	}
 }
 
-// queriedMetrics are the metrics demo/query.sh deliberately reads. A
-// metric in this list must grade as queried once sub-project B ingests
-// the log; a metric absent from it must not.
-var queriedMetrics = []string{
-	"node_cpu_seconds_total",
-	"node_memory_MemAvailable_bytes",
-	"jetsam_demo_requests_total",
+// issuedQueries are exactly the queries demo/query.sh sends. Matching the
+// full query string, rather than a metric name appearing somewhere in the
+// log, is deliberate: other tests in this package query Prometheus too,
+// and one of them reads jetsam_demo_requests_total. Substring matching on
+// the metric name let that test satisfy this assertion, so this test went
+// on passing whether or not query.sh had run at all.
+var issuedQueries = []string{
+	`sum by (mode) (rate(node_cpu_seconds_total[5m]))`,
+	`node_memory_MemAvailable_bytes`,
+	`sum by (path) (rate(jetsam_demo_requests_total[5m]))`,
 }
 
 // TestQueryLogCapturesTheKnownQueries proves the second seam sub-project
@@ -192,17 +195,17 @@ func TestQueryLogCapturesTheKnownQueries(t *testing.T) {
 			continue
 		}
 		apiQueries++
-		for _, m := range queriedMetrics {
-			if strings.Contains(entry.Params.Query, m) {
-				seen[m] = true
+		for _, q := range issuedQueries {
+			if entry.Params.Query == q {
+				seen[q] = true
 			}
 		}
 	}
 	t.Logf("query log: %d API queries, %d rule evaluations", apiQueries, ruleQueries)
 
-	for _, m := range queriedMetrics {
-		if !seen[m] {
-			t.Errorf("query log does not contain a read of %s -- did demo/query.sh run?", m)
+	for _, q := range issuedQueries {
+		if !seen[q] {
+			t.Errorf("query log does not contain a read of %q -- did demo/query.sh run?", q)
 		}
 	}
 	if ruleQueries == 0 {
