@@ -11,6 +11,11 @@ pull request against your scrape config for the difference.
 Every recommendation names the queries it was checked against, so you can
 redo the check by hand.
 
+![jetsam scanning the public Prometheus demo, proposing nothing, then writing relabel rules once told to](.github/assets/demo.gif)
+
+Recorded against [prometheus.demo.prometheus.io](https://prometheus.demo.prometheus.io)
+with `demo/record.sh`. Every number in it is real.
+
 ## Install
 
 ```
