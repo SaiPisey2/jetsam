@@ -11,10 +11,15 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 grafana=${GRAFANA_URL:-http://localhost:3000}
 admin=${GRAFANA_ADMIN:-admin:admin}
 
+healthy=
 for _ in $(seq 1 60); do
-	curl -sf -u "$admin" "$grafana/api/health" >/dev/null && break
+	if curl -sf -u "$admin" "$grafana/api/health" >/dev/null; then
+		healthy=1
+		break
+	fi
 	sleep 1
 done
+[ -n "$healthy" ] || { echo "grafana at $grafana did not become healthy within 60s" >&2; exit 1; }
 
 # Parsed with python3's json module rather than sed: a field-order or
 # whitespace change in Grafana's response would silently break a sed
@@ -31,10 +36,19 @@ if [ -z "$id" ]; then
 fi
 [ -n "$id" ] || { echo "could not create or find the service account" >&2; exit 1; }
 
-curl -sf -u "$admin" -X POST "$grafana/api/serviceaccounts/$id/tokens" \
+# Captured into a variable rather than redirected straight onto .token:
+# a redirect truncates the file before the pipeline runs, so a failed
+# request would abort the script (set -e) with a zero-byte .token already
+# on disk and the -s guard below never reached.
+key=$(curl -sf -u "$admin" -X POST "$grafana/api/serviceaccounts/$id/tokens" \
 	-H 'Content-Type: application/json' \
 	-d "{\"name\":\"jetsam-demo-$(date +%s)\"}" |
-	python3 -c 'import json,sys; print(json.load(sys.stdin).get("key",""))' >.token
+	python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])' 2>/dev/null) || {
+	echo "could not create a service account token (grafana at $grafana rejected the request)" >&2
+	exit 1
+}
+[ -n "$key" ] || { echo "token creation returned no key" >&2; exit 1; }
+printf '%s\n' "$key" >.token
 
 [ -s .token ] || { echo "token creation returned no key" >&2; exit 1; }
 echo "wrote demo/grafana/.token"
