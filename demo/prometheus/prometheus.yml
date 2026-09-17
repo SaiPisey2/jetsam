@@ -1,0 +1,23 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  # Query logging is a config-file field in this Prometheus version, not a
+  # CLI flag (the --query.log-file flag the brief specified does not exist
+  # in v3.13.0 and crashes the server on startup).
+  query_log_file: /querylog/queries.log
+
+rule_files:
+  - /etc/prometheus/rules/*.yaml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: node
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  - job_name: loadgen
+    static_configs:
+      - targets: ['loadgen:8081']

@@ -1,0 +1,28 @@
+services:
+  loadgen:
+    build: ./loadgen
+    ports: ["8081:8081"]
+
+  node-exporter:
+    image: prom/node-exporter:v1.10.0@sha256:dbb30baa213b9a8c9aff7fe00c124ec371752c92215f014ec6f26159e9c55ff3
+    ports: ["9100:9100"]
+
+  prometheus:
+    image: prom/prometheus:v3.13.0@sha256:c6b27ea434f8389bfe233fbc7be381cf50587c286e871bc842008f5a1b1908a7
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Query log destination is set via global.query_log_file in
+      # prometheus.yml -- this Prometheus version has no CLI flag for it.
+      # The directory is bind-mounted because jetsam runs on the host, not
+      # in a container, and sub-project B needs to read the file from there.
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - ./querylog:/querylog
+      - promdata:/prometheus
+    ports: ["9090:9090"]
+    depends_on: [loadgen, node-exporter]
+
+volumes:
+  promdata:
