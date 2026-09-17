@@ -9,12 +9,19 @@ global:
 rule_files:
   - /etc/prometheus/rules/*.yaml
 
+# The job names are not free to choose: every vendored rule selects on
+# job=, and the prometheus rules also select namespace="monitoring". The
+# rules are the upstream artifact and therefore the authority, so the
+# stack is named to match them. Renaming a job here to something tidier
+# silently empties all 15 recording rules.
 scrape_configs:
-  - job_name: prometheus
+  - job_name: prometheus-k8s
     static_configs:
       - targets: ['localhost:9090']
+        labels:
+          namespace: monitoring
 
-  - job_name: node
+  - job_name: node-exporter
     static_configs:
       - targets: ['node-exporter:9100']
 

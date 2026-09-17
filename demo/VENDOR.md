@@ -24,6 +24,16 @@ Transform: `demo/vendortool` lifts `spec.groups` out of the
 | `prometheus/rules/prometheus.yaml` | 1 | 23 | 0 | 23 |
 | **total** | **3** | **64** | **15** | **49** |
 
+The scrape job names in `demo/prometheus/prometheus.yml` are chosen to
+match these rules' selectors, not the other way round: every node-exporter
+rule selects `job="node-exporter"`, and every prometheus rule selects
+`job="prometheus-k8s", namespace="monitoring"`. The rules are the upstream
+artifact, so they are the authority. Renaming a job to something tidier
+like `node` or `prometheus` does not fail anything loudly -- the rules
+still load and still evaluate `health: ok` -- it just makes all 15
+recording rules produce zero series and all 49 alerting rules permanently
+inactive, which is a fixture that measures nothing.
+
 ## Grafana dashboard
 
 Source: https://grafana.com/api/dashboards/1860 — "Node Exporter Full"

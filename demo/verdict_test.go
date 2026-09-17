@@ -72,6 +72,28 @@ func TestKnownArchetypesGradeCorrectly(t *testing.T) {
 			want:   verdict.GradeUnreferenced,
 			why:    "only a dashboard reads it, and v0.1's corpus is rules only",
 		},
+		// This case exists to exercise verdict.Compute's Produced branch --
+		// the rule that stops jetsam proposing a drop for a metric one of
+		// its own recording rules writes. Delete that branch and this
+		// assertion is the one that fails.
+		//
+		// The metric is chosen, not arbitrary. instance:node_num_cpu:sum
+		// would NOT work: instance:node_load1_per_cpu:ratio reads it, so it
+		// reaches GradeUsed through the Used branch, which comes first, and
+		// the assertion would pass with the Produced branch deleted.
+		// instance:node_cpu_utilisation:rate5m is written by a recording
+		// rule and read by nothing, so Produced is the only branch that can
+		// grade it used.
+		//
+		// It also depends on the recording rule actually producing series:
+		// if the scrape job names stop matching the vendored rules'
+		// selectors, this metric vanishes from the inventory and the case
+		// fails with "absent from the inventory entirely".
+		{
+			metric: "instance:node_cpu_utilisation:rate5m",
+			want:   verdict.GradeUsed,
+			why:    "a recording rule writes it, and nothing reads it -- only Produced can protect it",
+		},
 	}
 	for _, tc := range cases {
 		got, ok := grades[tc.metric]

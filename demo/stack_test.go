@@ -64,27 +64,55 @@ func TestStackLoadsEveryVendoredRule(t *testing.T) {
 	}
 }
 
+// wantJobs is the exact set of scrape jobs the stack configures. The
+// names are dictated by the vendored rules' selectors, not chosen: see
+// the comment in demo/prometheus/prometheus.yml.
+var wantJobs = []string{"prometheus-k8s", "node-exporter", "loadgen"}
+
 // TestEveryScrapeTargetIsUp catches the failure that makes every later
 // assertion meaningless: a target that is not scraped contributes no
 // metrics, so its metrics grade as absent rather than unread.
+//
+// It reads /api/v1/targets rather than the `up` metric on purpose. `up`
+// is a time series, so Prometheus' 5-minute lookback keeps serving the
+// last sample of a target that has been removed from the scrape config
+// entirely -- renaming every job left the old expectations passing for
+// five minutes. /api/v1/targets reports the live configuration, so a job
+// that no longer exists disappears from it immediately.
+//
+// The assertion is set equality, not containment: an unexpected job is a
+// failure too, because a stray target is how a metric quietly acquires a
+// second source.
 func TestEveryScrapeTargetIsUp(t *testing.T) {
 	var body struct {
 		Data struct {
-			Result []struct {
-				Metric map[string]string `json:"metric"`
-				Value  []any             `json:"value"`
-			} `json:"result"`
+			ActiveTargets []struct {
+				Labels map[string]string `json:"labels"`
+				Health string            `json:"health"`
+			} `json:"activeTargets"`
 		} `json:"data"`
 	}
-	get(t, "/api/v1/query?query=up", &body)
+	get(t, "/api/v1/targets?state=active", &body)
 
-	up := map[string]bool{}
-	for _, r := range body.Data.Result {
-		up[r.Metric["job"]] = r.Value[1] == "1"
+	health := map[string]string{}
+	for _, tgt := range body.Data.ActiveTargets {
+		health[tgt.Labels["job"]] = tgt.Health
 	}
-	for _, job := range []string{"prometheus", "node", "loadgen"} {
-		if !up[job] {
-			t.Errorf("job %q is not up (targets seen: %v)", job, up)
+	for _, job := range wantJobs {
+		switch h, ok := health[job]; {
+		case !ok:
+			t.Errorf("job %q has no active target (targets seen: %v)", job, health)
+		case h != "up":
+			t.Errorf("job %q is %q, want \"up\" (targets seen: %v)", job, h, health)
+		}
+	}
+	want := map[string]bool{}
+	for _, job := range wantJobs {
+		want[job] = true
+	}
+	for job := range health {
+		if !want[job] {
+			t.Errorf("unexpected scrape job %q (want exactly %v)", job, wantJobs)
 		}
 	}
 }
