@@ -58,9 +58,9 @@ func TestStackLoadsEveryVendoredRule(t *testing.T) {
 			}
 		}
 	}
-	if len(body.Data.Groups) != 3 || rules != 64 || recording != 15 {
-		t.Errorf("prometheus loaded %d groups / %d rules / %d recording, want 3 / 64 / 15 (see demo/VENDOR.md)",
-			len(body.Data.Groups), rules, recording)
+	if len(body.Data.Groups) != wantGroups || rules != wantRules || recording != wantRecording {
+		t.Errorf("prometheus loaded %d groups / %d rules / %d recording, want %d / %d / %d (see demo/VENDOR.md)",
+			len(body.Data.Groups), rules, recording, wantGroups, wantRules, wantRecording)
 	}
 }
 

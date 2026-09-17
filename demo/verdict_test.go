@@ -62,10 +62,17 @@ func TestKnownArchetypesGradeCorrectly(t *testing.T) {
 			want:   verdict.GradeUsed,
 			why:    "the vendored node-exporter rules read it",
 		},
+		// This is the intended canary for the arrival of dashboards in the
+		// corpus. No vendored RULE names this metric, which is why it is
+		// unreferenced today -- but dashboard 1860 does name it, in one of
+		// the panel queries that parse without substitution. When
+		// sub-project B adds dashboards, this case is meant to flip to
+		// used, and that flip is the signal that the corpus widened, not a
+		// stale expectation to be quietly corrected.
 		{
 			metric: "node_scrape_collector_duration_seconds",
 			want:   verdict.GradeUnreferenced,
-			why:    "no vendored rule names it",
+			why:    "no vendored rule names it, and v0.1's corpus is rules only -- dashboard 1860 does name it",
 		},
 		{
 			metric: "jetsam_demo_requests_total",
@@ -109,7 +116,7 @@ func TestKnownArchetypesGradeCorrectly(t *testing.T) {
 
 // TestRecordingRuleOutputsAreProtected checks the rule that stops jetsam
 // proposing a drop for a metric one of its own recording rules writes.
-// The vendored corpus supplies 15 of them, so this is checked against
+// The vendored corpus supplies all of them, so this is checked against
 // real rule outputs rather than an invented one.
 func TestRecordingRuleOutputsAreProtected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -122,8 +129,8 @@ func TestRecordingRuleOutputsAreProtected(t *testing.T) {
 	}
 	c := corpus.Build(rules, nil)
 
-	if len(c.Produced) != 15 {
-		t.Errorf("corpus recorded %d produced metrics, want 15 (see demo/VENDOR.md)", len(c.Produced))
+	if len(c.Produced) != wantRecording {
+		t.Errorf("corpus recorded %d produced metrics, want %d (see demo/VENDOR.md)", len(c.Produced), wantRecording)
 	}
 	for _, want := range []string{
 		"instance:node_num_cpu:sum",
@@ -153,7 +160,7 @@ func TestTheCorpusBlocksNothing(t *testing.T) {
 	if len(c.Blocked) != 0 {
 		t.Errorf("corpus blocked %d queries, want 0: %v", len(c.Blocked), c.Blocked)
 	}
-	if c.Queries != 64 {
-		t.Errorf("corpus read %d queries, want 64 (see demo/VENDOR.md)", c.Queries)
+	if c.Queries != wantRules {
+		t.Errorf("corpus read %d queries, want %d (see demo/VENDOR.md)", c.Queries, wantRules)
 	}
 }

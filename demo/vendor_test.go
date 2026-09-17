@@ -10,10 +10,29 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// wantRules is what VENDOR.md records for each vendored rule file. These
-// are asserted rather than trusted: an upstream bump that changes them is
-// a deliberate, reviewable event, not a silent one.
-var wantRules = map[string]struct{ groups, rules, recording int }{
+// Every count this fixture pins lives here. This is the only file in
+// package demo with no build tag, so the integration-tagged files
+// (stack_test.go, verdict_test.go) compile against these same constants.
+// The numbers used to be spelled out independently in four files, which
+// made VENDOR.md's bump procedure -- "update the counts here and in
+// vendor_test.go" -- silently incomplete.
+const (
+	wantGroups    = 3
+	wantRules     = 64
+	wantRecording = 15
+	wantAlerting  = 49
+
+	wantPanelQueries = 284
+	// wantParsingQueries is how many of those panel queries are valid
+	// PromQL with no template substitution at all. See
+	// TestVendoredDashboardCarriesTheTemplateVariableHazard.
+	wantParsingQueries = 160
+)
+
+// vendoredRuleFiles is what VENDOR.md records for each vendored rule file.
+// These are asserted rather than trusted: an upstream bump that changes
+// them is a deliberate, reviewable event, not a silent one.
+var vendoredRuleFiles = map[string]struct{ groups, rules, recording int }{
 	"prometheus/rules/node-exporter.yaml": {groups: 2, rules: 41, recording: 15},
 	"prometheus/rules/prometheus.yaml":    {groups: 1, rules: 23, recording: 0},
 }
@@ -39,7 +58,7 @@ func TestVendoredRulesParseAndMatchVendorDoc(t *testing.T) {
 	// parser.ParseExpr, and this is the exact parser that reads these
 	// rules' expr fields in production.
 	p := parser.NewParser(parser.Options{})
-	for path, want := range wantRules {
+	for path, want := range vendoredRuleFiles {
 		t.Run(path, func(t *testing.T) {
 			b, err := os.ReadFile(path)
 			if err != nil {
@@ -73,13 +92,48 @@ func TestVendoredRulesParseAndMatchVendorDoc(t *testing.T) {
 			}
 		})
 	}
+
+	// The per-file table and the pinned totals are two spellings of the
+	// same numbers, and the build-tagged tests assert the totals against
+	// the running stack. If a bump updates one and not the other, the
+	// fixture disagrees with itself; say so here rather than letting a
+	// stack test fail with no clue why.
+	groups, rules, recording := 0, 0, 0
+	for _, want := range vendoredRuleFiles {
+		groups += want.groups
+		rules += want.rules
+		recording += want.recording
+	}
+	if groups != wantGroups || rules != wantRules || recording != wantRecording {
+		t.Errorf("the per-file table sums to %d groups / %d rules / %d recording, "+
+			"but the pinned totals are %d / %d / %d -- a bump updated one and not the other",
+			groups, rules, recording, wantGroups, wantRules, wantRecording)
+	}
+	if wantRecording+wantAlerting != wantRules {
+		t.Errorf("the pinned totals do not add up: %d recording + %d alerting != %d rules",
+			wantRecording, wantAlerting, wantRules)
+	}
 }
 
 // TestVendoredDashboardCarriesTheTemplateVariableHazard pins the finding
-// that shapes sub-project B: every panel query in a real dashboard is
-// template-variable laden and therefore not valid PromQL until
-// substituted. If this ever stops being true, B's substitution layer is
-// solving a problem the fixture no longer contains, and we want to know.
+// that shapes sub-project B -- as a split, not as a slogan.
+//
+// All 284 panel queries contain a template variable, but that does not
+// make them all unparseable. A `$` inside a label value (instance="$node")
+// is perfectly good PromQL; only a `$` inside a duration
+// ([$__rate_interval]) is a syntax error. Parsed with the same parser
+// internal/corpus uses, 160 of the 284 parse and 124 fail.
+//
+// That split IS the hazard. A corpus reader with no substitution does not
+// refuse the dashboard outright -- it silently recovers 160 queries, and
+// the metric names in them, biased towards the panels that do not call
+// rate(). A partial corpus that looks like it is working is more
+// dangerous than uniform refusal, because nothing announces the gap.
+//
+// Asserting the split rather than "every query contains a $" is what lets
+// this test notice the hazard DISAPPEARING: if upstream rewrote every
+// [$__rate_interval] to [5m], the `$` assertion would still hold while
+// the fixture quietly stopped containing the problem B exists to solve.
 func TestVendoredDashboardCarriesTheTemplateVariableHazard(t *testing.T) {
 	b, err := os.ReadFile("grafana/dashboards/node-exporter-full.json")
 	if err != nil {
@@ -94,9 +148,9 @@ func TestVendoredDashboardCarriesTheTemplateVariableHazard(t *testing.T) {
 	var exprs []string
 	collectExprs(dash.Panels, &exprs)
 
-	if len(exprs) != 284 {
-		t.Errorf("dashboard has %d panel queries, want 284 -- upstream revision changed; "+
-			"re-run demo/vendor.sh and update demo/VENDOR.md deliberately", len(exprs))
+	if len(exprs) != wantPanelQueries {
+		t.Errorf("dashboard has %d panel queries, want %d -- upstream revision changed; "+
+			"re-run demo/vendor.sh and update demo/VENDOR.md deliberately", len(exprs), wantPanelQueries)
 	}
 	withVars := 0
 	for _, e := range exprs {
@@ -106,6 +160,20 @@ func TestVendoredDashboardCarriesTheTemplateVariableHazard(t *testing.T) {
 	}
 	if withVars != len(exprs) {
 		t.Errorf("%d of %d panel queries carry a template variable, want all of them", withVars, len(exprs))
+	}
+
+	p := parser.NewParser(parser.Options{})
+	parses := 0
+	for _, e := range exprs {
+		if _, err := p.ParseExpr(e); err == nil {
+			parses++
+		}
+	}
+	if parses != wantParsingQueries {
+		t.Errorf("%d of %d panel queries parse as PromQL with no substitution (%d fail), want %d / %d -- "+
+			"if this went UP the fixture has lost the hazard sub-project B's substitution layer exists for; "+
+			"re-run demo/vendor.sh and update demo/VENDOR.md deliberately",
+			parses, len(exprs), len(exprs)-parses, wantParsingQueries, wantPanelQueries-wantParsingQueries)
 	}
 }
 
