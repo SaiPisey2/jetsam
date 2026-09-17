@@ -72,29 +72,44 @@ func TestProposeReportsUnresolvedAlongsideARealDrop(t *testing.T) {
 	}
 	out := stdout.String()
 
-	// The real drop must still be proposed.
-	if !strings.Contains(out, "live_orphan_total") {
-		t.Errorf("the resolvable metric was not proposed:\n%s", out)
+	// Split the run's output in two before asserting anything about
+	// either half. propose prints the terminal report first and then the
+	// pull request title and body, into the same stream -- so a check
+	// against the whole buffer is satisfied by EITHER half. That is not a
+	// check on both: with printUnresolved deleted, the metric name and
+	// the explanation both still appear, in the PR body's Declined
+	// section, and this test went on passing. The terminal notice and the
+	// PR body are two separate obligations and need two separate
+	// assertions.
+	titleAt := strings.Index(out, "jetsam: stop storing")
+	if titleAt < 0 {
+		t.Fatalf("no pull request title in the output, so it cannot be split into terminal and body halves:\n%s", out)
 	}
-	if !strings.Contains(out, "metric_relabel_configs") {
-		t.Errorf("nothing was rendered despite one resolvable candidate:\n%s", out)
+	terminal, prBody := out[:titleAt], out[titleAt:]
+
+	// The real drop must still be proposed.
+	if !strings.Contains(terminal, "live_orphan_total") {
+		t.Errorf("the resolvable metric was not proposed:\n%s", terminal)
+	}
+	if !strings.Contains(terminal, "metric_relabel_configs") {
+		t.Errorf("nothing was rendered despite one resolvable candidate:\n%s", terminal)
 	}
 
-	// The unresolved metric must be named in the terminal output, not
+	// The unresolved metric must be named in the TERMINAL output, not
 	// silently absorbed because a drop existed elsewhere in the same run.
-	if !strings.Contains(out, "stale_orphan_total") {
-		t.Errorf("terminal output does not name the unresolved metric:\n%s", out)
+	if !strings.Contains(terminal, "stale_orphan_total") {
+		t.Errorf("terminal output does not name the unresolved metric:\n%s", terminal)
 	}
-	if !strings.Contains(out, "no job currently exposing them") && !strings.Contains(out, "no job currently exposes it") {
-		t.Errorf("terminal output does not explain why the metric was withheld:\n%s", out)
+	if !strings.Contains(terminal, "no job currently exposing them") {
+		t.Errorf("terminal output does not explain why the metric was withheld:\n%s", terminal)
 	}
 
 	// And it must reach the PR body's own Declined section, the same way a
 	// blocked rule or a job-missing decline does.
-	if !strings.Contains(out, "### Declined") {
-		t.Errorf("PR body does not carry a Declined section:\n%s", out)
+	if !strings.Contains(prBody, "### Declined") {
+		t.Errorf("PR body does not carry a Declined section:\n%s", prBody)
 	}
-	bodySection := out[strings.Index(out, "### Declined"):]
+	bodySection := prBody[strings.Index(prBody, "### Declined"):]
 	if !strings.Contains(bodySection, "stale_orphan_total") {
 		t.Errorf("PR body's Declined section does not name the unresolved metric:\n%s", bodySection)
 	}
