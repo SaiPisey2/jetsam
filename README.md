@@ -79,6 +79,11 @@ since a flag value lands in `ps` output and shell history. `-apply` without
   run prints the exact diff; read it before `-apply`.
 - **Reverting restores collection, not history.** Series not written while
   a drop rule is live cannot be recovered.
+- **`-apply` has never opened a real pull request.** The branch, the
+  stale-blob refusals and the "do not reopen a closed PR" behaviour are
+  tested against a fake forge and a stubbed GitHub API, and the dry run is
+  correct against real scrape configs. Only the live write path is
+  unproven.
 - **Resolving each candidate's job is one Prometheus query.** Against a
   1374-metric instance, resolving every candidate returned by
   `-include-unreferenced` takes about 26 seconds -- this runs concurrently,
