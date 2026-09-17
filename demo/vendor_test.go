@@ -2,14 +2,12 @@ package demo
 
 import (
 	"encoding/json"
-	"log/slog"
 	"os"
 	"strings"
 	"testing"
 
-	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/model/rulefmt"
 	"github.com/prometheus/prometheus/promql/parser"
+	"gopkg.in/yaml.v3"
 )
 
 // wantRules is what VENDOR.md records for each vendored rule file. These
@@ -20,27 +18,58 @@ var wantRules = map[string]struct{ groups, rules, recording int }{
 	"prometheus/rules/prometheus.yaml":    {groups: 1, rules: 23, recording: 0},
 }
 
+// ruleFile mirrors just enough of the plain Prometheus rule file shape --
+// groups of rules, each either a recording rule (record) or an alerting
+// rule (alert), each carrying a PromQL expr -- to count and validate
+// without pulling in rulefmt itself.
+type ruleFile struct {
+	Groups []struct {
+		Name  string `yaml:"name"`
+		Rules []struct {
+			Record string `yaml:"record"`
+			Alert  string `yaml:"alert"`
+			Expr   string `yaml:"expr"`
+		} `yaml:"rules"`
+	} `yaml:"groups"`
+}
+
 func TestVendoredRulesParseAndMatchVendorDoc(t *testing.T) {
+	// Same parser construction as internal/corpus/refs.go: at
+	// prometheus/prometheus v0.314.0 there is no package-level
+	// parser.ParseExpr, and this is the exact parser that reads these
+	// rules' expr fields in production.
 	p := parser.NewParser(parser.Options{})
 	for path, want := range wantRules {
 		t.Run(path, func(t *testing.T) {
-			groups, errs := rulefmt.ParseFile(path, false, model.UTF8Validation, p, slog.Default())
-			if len(errs) > 0 {
-				t.Fatalf("%s does not parse as a Prometheus rule file: %v", path, errs)
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("%s does not parse as a Prometheus rule file: %v", path, err)
+			}
+			var rf ruleFile
+			if err := yaml.Unmarshal(b, &rf); err != nil {
+				t.Fatalf("%s does not parse as a Prometheus rule file: %v", path, err)
 			}
 			rules, recording := 0, 0
-			for _, g := range groups.Groups {
+			for _, g := range rf.Groups {
 				for _, r := range g.Rules {
 					rules++
 					if r.Record != "" {
 						recording++
 					}
+					if _, err := p.ParseExpr(r.Expr); err != nil {
+						name := r.Record
+						if name == "" {
+							name = r.Alert
+						}
+						t.Errorf("%s: rule %q in group %q has an expr that is not valid PromQL: %v",
+							path, name, g.Name, err)
+					}
 				}
 			}
-			if len(groups.Groups) != want.groups || rules != want.rules || recording != want.recording {
+			if len(rf.Groups) != want.groups || rules != want.rules || recording != want.recording {
 				t.Errorf("%s has %d groups / %d rules / %d recording, want %d / %d / %d -- "+
 					"upstream changed; re-run demo/vendor.sh and update demo/VENDOR.md deliberately",
-					path, len(groups.Groups), rules, recording, want.groups, want.rules, want.recording)
+					path, len(rf.Groups), rules, recording, want.groups, want.rules, want.recording)
 			}
 		})
 	}
