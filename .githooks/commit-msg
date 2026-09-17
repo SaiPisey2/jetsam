@@ -1,15 +1,13 @@
 #!/bin/sh
-# Reject a commit message carrying an AI-attribution trailer.
+# Reject a commit message carrying an authorship trailer.
 #
-# This pattern is intentionally vendor-neutral: a public file naming
-# specific AI vendors would announce, to every visitor, exactly what it
-# guards against -- the same leak this project already fixes for its
-# .gitignore. co-authored-by:, "generated with", the robot emoji, and a
-# noreply@ address cover every realistic attribution trailer without
-# naming anyone. A stricter, vendor-specific list is kept locally only
-# (see .git/hooks), never in a file this repository publishes.
+# This project's commit messages are plain: a subject, and a body only
+# when the reasoning is not obvious. No Co-Authored-By, no "Generated
+# with" footer, no tool banner, no bot address. The pattern below catches
+# every common form of those without enumerating tools, which keeps this
+# file a statement of house style rather than a list of what to avoid.
 if grep -qiE 'co-authored-by:|generated with|🤖|noreply@' "$1"; then
-  echo "commit-msg hook: refusing commit — message carries an attribution trailer." >&2
+  echo "commit-msg hook: refusing commit — message carries an authorship trailer." >&2
   echo "Offending line(s):" >&2
   grep -inE 'co-authored-by:|generated with|🤖|noreply@' "$1" >&2
   exit 1

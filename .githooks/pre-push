@@ -1,15 +1,11 @@
 #!/bin/sh
-# Last line of defence: audit every commit being pushed for an
-# AI-attribution trailer.
-#
-# Vendor-neutral by design -- see .githooks/commit-msg for why a public
-# file must not name specific AI vendors. A stricter, vendor-specific
-# list is kept locally only (see .git/hooks), never here.
+# Last line of defence: audit every commit being pushed for an authorship
+# trailer. See .githooks/commit-msg for the house style this enforces.
 range=$(git rev-list @{u}..HEAD 2>/dev/null || git rev-list HEAD)
 fail=0
 for sha in $range; do
   if git log -1 --format='%B' "$sha" | grep -qiE 'co-authored-by:|generated with|🤖|noreply@'; then
-    echo "pre-push: $sha carries an attribution trailer" >&2
+    echo "pre-push: $sha carries an authorship trailer" >&2
     fail=1
   fi
 done
