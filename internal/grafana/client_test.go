@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,14 @@ func stub(t *testing.T, search string, byUID map[string]string) *Client {
 		if r.Header.Get("Authorization") != "Bearer tok" {
 			w.WriteHeader(http.StatusUnauthorized)
 			fmt.Fprint(w, `{"message":"Unauthorized"}`)
+			return
+		}
+		// Honour page the way Grafana does: everything on page 1, nothing
+		// after it. A stub that served the same body for every page would
+		// be a stub of a server that ignores pagination, and the client
+		// refuses to page against one of those on purpose.
+		if page := r.URL.Query().Get("page"); page != "" && page != "1" {
+			fmt.Fprint(w, `[]`)
 			return
 		}
 		fmt.Fprint(w, search)
@@ -218,6 +227,136 @@ func TestANullDashboardBodyIsAnError(t *testing.T) {
 	}
 }
 
+// pagingStub serves /api/search with real pagination: it honours limit and
+// page exactly as Grafana does, returning a short final page.
+func pagingStub(t *testing.T, uids []string, serverLimit int) (*Client, *int) {
+	t.Helper()
+	calls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if limit <= 0 || limit > serverLimit {
+			// Grafana caps the limit server-side. A client that asks for
+			// more than the cap gets the cap, not what it asked for --
+			// which is why "I asked for everything" is not a substitute
+			// for paging.
+			limit = serverLimit
+		}
+		if page <= 0 {
+			page = 1
+		}
+		start := (page - 1) * limit
+		if start > len(uids) {
+			start = len(uids)
+		}
+		end := start + limit
+		if end > len(uids) {
+			end = len(uids)
+		}
+		var hits []string
+		for _, u := range uids[start:end] {
+			hits = append(hits, fmt.Sprintf(`{"uid":%q,"title":%q}`, u, u))
+		}
+		fmt.Fprintf(w, "[%s]", strings.Join(hits, ","))
+	})
+	mux.HandleFunc("/api/dashboards/uid/", func(w http.ResponseWriter, r *http.Request) {
+		uid := strings.TrimPrefix(r.URL.Path, "/api/dashboards/uid/")
+		fmt.Fprintf(w, `{"dashboard":{"uid":%q,"title":%q,"panels":[{"targets":[{"expr":"metric_%s"}]}]}}`, uid, uid, uid)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "tok", 30*time.Second)
+	c.Client = srv.Client()
+	return c, &calls
+}
+
+// TestDashboardsPagesThroughTheSearch is the one that matters for a large
+// install: /api/search is paginated and defaults to 1000 results, so a
+// request with neither limit nor page silently returns a prefix. Every
+// dashboard past the cut is then absent from the corpus, and the metrics
+// only those dashboards read grade as unread -- a partial corpus reporting
+// itself as complete, which is the one failure mode this package exists to
+// prevent.
+//
+// The stub caps its page size server-side at 3, below what the client asks
+// for, so the test fails unless the client actually pages: asking for a
+// large limit is not enough.
+func TestDashboardsPagesThroughTheSearch(t *testing.T) {
+	var uids []string
+	for i := 0; i < 7; i++ {
+		uids = append(uids, fmt.Sprintf("d%d", i))
+	}
+	c, calls := pagingStub(t, uids, 3)
+
+	got, err := c.Dashboards(context.Background())
+	if err != nil {
+		t.Fatalf("Dashboards: %v", err)
+	}
+	if len(got) != len(uids) {
+		t.Fatalf("got %d dashboards, want %d -- the search was not paged through", len(got), len(uids))
+	}
+	seen := map[string]bool{}
+	for _, d := range got {
+		seen[d.UID] = true
+	}
+	for _, u := range uids {
+		if !seen[u] {
+			t.Errorf("dashboard %s is missing from a paged search", u)
+		}
+	}
+	// 7 dashboards at a server-capped 3 per page: three pages of results
+	// and a fourth, empty one that ends the loop. The cap is below what
+	// the client asks for on purpose -- a short page is not proof of the
+	// end when the server chooses the page size.
+	if *calls != 4 {
+		t.Errorf("/api/search called %d times, want 4 (pages of 3 over 7 dashboards, then an empty page)", *calls)
+	}
+}
+
+// TestDashboardsSendsLimitAndPage pins the request shape itself. Grafana
+// honours both parameters; omitting them is what caused the truncation.
+func TestDashboardsSendsLimitAndPage(t *testing.T) {
+	var queries []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		fmt.Fprint(w, `[]`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "tok", 30*time.Second)
+	c.Client = srv.Client()
+
+	if _, err := c.Dashboards(context.Background()); err != nil {
+		t.Fatalf("Dashboards: %v", err)
+	}
+	if len(queries) != 1 {
+		t.Fatalf("got %d search requests, want 1 (an empty first page ends the loop): %v", len(queries), queries)
+	}
+	for _, want := range []string{"type=dash-db", "limit=", "page=1"} {
+		if !strings.Contains(queries[0], want) {
+			t.Errorf("search query %q does not contain %q", queries[0], want)
+		}
+	}
+}
+
+// TestSearchHitWithNoUIDIsAnError: a search array carrying [null] or [{}]
+// decodes into a zero-value hit. Fetching it would 404, and the 404 path
+// means "a dashboard was deleted between the search and the fetch", which
+// is a thing jetsam is entitled to shrug at. A search response that is not
+// what it claims to be is not.
+func TestSearchHitWithNoUIDIsAnError(t *testing.T) {
+	for _, body := range []string{`[null]`, `[{}]`, `[{"uid":"a","title":"A"},{"title":"no uid"}]`} {
+		c := stub(t, body, map[string]string{"a": `{"dashboard":{"uid":"a","title":"A","panels":[]}}`})
+		got, err := c.Dashboards(context.Background())
+		if err == nil {
+			t.Errorf("search body %s returned %d dashboards and no error, want an error", body, len(got))
+		}
+	}
+}
+
 // TestDatasourceVariablesAreNotCountedAsQueries: a datasource variable's
 // query field is the plain string "prometheus" -- a datasource name, not
 // PromQL. Counting it inflates the query total a pull request quotes as
@@ -239,5 +378,29 @@ func TestDatasourceVariablesAreNotCountedAsQueries(t *testing.T) {
 	want := []string{"label_values(node_uname_info, job)"}
 	if len(got[0].VariableQueries) != len(want) || got[0].VariableQueries[0] != want[0] {
 		t.Errorf("VariableQueries = %v, want %v", got[0].VariableQueries, want)
+	}
+}
+
+// TestSearchThatIgnoresPagingIsAnError: a server that returns page 1 for
+// every page would otherwise be paged over until maxSearchPages, or
+// forever under a naive loop. Refusing is right rather than merely safe --
+// a Grafana that ignores the page parameter cannot be enumerated at all,
+// so its dashboard list is unknown, not short.
+func TestSearchThatIgnoresPagingIsAnError(t *testing.T) {
+	var body []string
+	for i := 0; i < 3; i++ {
+		body = append(body, fmt.Sprintf(`{"uid":"d%d","title":"D"}`, i))
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "[%s]", strings.Join(body, ","))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "tok", 30*time.Second)
+	c.Client = srv.Client()
+
+	if _, err := c.Dashboards(context.Background()); err == nil {
+		t.Error("a search that ignores the page parameter returned no error")
 	}
 }

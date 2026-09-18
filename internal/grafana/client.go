@@ -149,6 +149,21 @@ type searchHit struct {
 	Title string `json:"title"`
 }
 
+// searchPageSize is the limit asked of /api/search. Grafana's own default
+// is 1000 and its documented maximum is 5000; asking for the maximum keeps
+// the number of round trips down without relying on the default, which is a
+// server-side choice jetsam does not control. Paging is what matters, not
+// this number: with no limit and no page parameter, dashboard 1001 onwards
+// is simply absent, and a partial corpus that reports itself as complete is
+// how a metric only a later dashboard reads becomes droppable.
+const searchPageSize = 5000
+
+// maxSearchPages bounds the paging loop. At searchPageSize each, this is
+// five million dashboards -- far past any real install -- so reaching it
+// means the server is not advancing rather than that the instance is
+// enormous.
+const maxSearchPages = 1000
+
 type panel struct {
 	Panels  []panel `json:"panels"`
 	Targets []struct {
@@ -218,10 +233,65 @@ func variableQuery(raw json.RawMessage) string {
 // Every dashboard is read; there is no folder or tag filter. More corpus means
 // fewer false drops, and a filter is a way to accidentally exclude the
 // dashboard that would have saved a metric.
+// search pages through /api/search until an empty page comes back.
+//
+// Grafana paginates this endpoint and defaults to 1000 results. A request
+// with neither limit nor page is therefore silently truncated on any
+// install with more dashboards than that -- exactly the large install
+// jetsam is aimed at -- and the metrics referenced only by the dashboards
+// past the cut grade as unread. A partial corpus that reports itself as
+// complete is the failure this package exists to prevent.
+//
+// The loop ends on an EMPTY page rather than a short one. A short page
+// looks like the end only if the server honoured the requested limit, and
+// nothing here gets to assume that: a Grafana (or a proxy in front of one)
+// that caps the page size below what was asked for would make page 1 look
+// final and truncate the corpus in exactly the silent way this fix is
+// about. One extra round trip is a cheap price for not having to trust it.
+// A server that ignores the page parameter and keeps returning page 1 is
+// caught by the repeat check rather than looped over forever.
+func (c *Client) search(ctx context.Context) ([]searchHit, error) {
+	var all []searchHit
+	seen := map[string]bool{}
+	for page := 1; page <= maxSearchPages; page++ {
+		var hits []searchHit
+		path := fmt.Sprintf("/api/search?type=dash-db&limit=%d&page=%d", searchPageSize, page)
+		if err := c.get(ctx, path, &hits); err != nil {
+			return nil, fmt.Errorf("list dashboards: %w", err)
+		}
+		if len(hits) == 0 {
+			return all, nil
+		}
+		fresh := 0
+		for _, h := range hits {
+			if h.UID == "" {
+				// A search array carrying [null] or [{}] decodes into a
+				// zero-value hit. Fetching it would 404 and be skipped as
+				// if a dashboard had been deleted mid-run, which is a
+				// different thing and one jetsam is entitled to shrug at.
+				// A search result with no UID means the search response is
+				// not what it claims to be, and an unreadable Grafana must
+				// never look like one with fewer dashboards.
+				return nil, fmt.Errorf("list dashboards: search returned an entry with no uid on page %d", page)
+			}
+			if seen[h.UID] {
+				continue
+			}
+			seen[h.UID] = true
+			fresh++
+			all = append(all, h)
+		}
+		if fresh == 0 {
+			return nil, fmt.Errorf("list dashboards: page %d of the search repeated an earlier page, so paging is not advancing", page)
+		}
+	}
+	return nil, fmt.Errorf("list dashboards: search did not end within %d pages", maxSearchPages)
+}
+
 func (c *Client) Dashboards(ctx context.Context) ([]Dashboard, error) {
-	var hits []searchHit
-	if err := c.get(ctx, "/api/search?type=dash-db", &hits); err != nil {
-		return nil, fmt.Errorf("list dashboards: %w", err)
+	hits, err := c.search(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	out := make([]Dashboard, 0, len(hits))
