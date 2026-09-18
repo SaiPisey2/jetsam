@@ -350,3 +350,49 @@ func TestAnOperatorOutsideTheKnownSetIsRefused(t *testing.T) {
 		t.Fatalf("want a refusal, got %v", refs)
 	}
 }
+
+// TestTheEveryLabelReasonSaysOnlyWhatHoldsForItsOwnCase is the fix for a
+// refusal that stated something false about the consumer: "some consumer
+// needs every label" is true of a bare selector, topk or count_values,
+// which pass every label of the raw series straight through -- but false of
+// a consumer Blockers explains, which asked for a specific requirement
+// (Required: [path]) that some OTHER cause (a function, a join, a clause
+// jetsam cannot resolve, conflicting claims) then forced All on. A reader
+// who opens `sum by (path)` after being told the consumer needed every
+// label concludes jetsam is wrong. Blockers is exactly what tells the two
+// cases apart, and each must get the sentence that is actually true of it.
+func TestTheEveryLabelReasonSaysOnlyWhatHoldsForItsOwnCase(t *testing.T) {
+	t.Run("no blocker: the consumer genuinely needs every label", func(t *testing.T) {
+		c := corpus.Corpus{
+			Used:  map[string]bool{"m_total": true},
+			Needs: map[string]corpus.MetricNeed{"m_total": {All: true, Ops: []string{"topk"}}},
+		}
+		_, refs := Decide(inv("m_total", 400), c, nil)
+		if len(refs) != 1 || !strings.Contains(refs[0].Reason, "some consumer needs every label") {
+			t.Fatalf("refusals = %v, want the generic reason -- it is true here", refs)
+		}
+	})
+
+	t.Run("a blocker: jetsam's requirement, not a claim about the consumer", func(t *testing.T) {
+		c := corpus.Corpus{
+			Used: map[string]bool{"m_total": true},
+			Needs: map[string]corpus.MetricNeed{"m_total": {
+				All: true, Required: []string{"path"},
+				Blockers: []string{"abs(...) is applied to it before aggregation, and does not commute with pre-aggregation"},
+			}},
+		}
+		_, refs := Decide(inv("m_total", 400), c, nil)
+		if len(refs) != 1 {
+			t.Fatalf("want a refusal, got %v", refs)
+		}
+		if strings.Contains(refs[0].Reason, "some consumer needs every label") {
+			t.Errorf("Reason = %q -- this consumer asked for exactly path, not every label; the generic sentence is false here", refs[0].Reason)
+		}
+		if !strings.Contains(refs[0].Reason, "every label of this metric must survive") {
+			t.Errorf("Reason = %q, want jetsam's own requirement stated instead", refs[0].Reason)
+		}
+		if !strings.Contains(refs[0].Reason, "abs(...) is applied to it before aggregation") {
+			t.Errorf("Reason = %q, want the blocker text carried through", refs[0].Reason)
+		}
+	})
+}

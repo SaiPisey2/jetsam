@@ -189,11 +189,22 @@ func refuse(metric string, need corpus.MetricNeed, c corpus.Corpus, dashboardCon
 		return "read by a query in the query log, which jetsam cannot rewrite", true
 	}
 	if need.All {
-		reason := "some consumer needs every label"
+		// need.All means jetsam's requirement is "every label must survive",
+		// which is NOT the same claim as "some consumer needs every label":
+		// that is true for a consumer that genuinely passes every label
+		// through unchanged (a bare selector, topk, count_values), but false
+		// for one that only reads a few labels and got All for some other
+		// reason -- an unsupported function, a join below the aggregate,
+		// two disagreeing claims in one query, a `without`/`ignoring` clause
+		// whose complement jetsam cannot compute, or evidence it could not
+		// read at all. Blockers is set in exactly those cases (see
+		// LabelNeed.Blocker), so its presence is what tells the two apart:
+		// a reader who opens `sum by (path)` must not be told the consumer
+		// wanted every label when it only ever asked for path.
 		if len(need.Blockers) > 0 {
-			reason += ": " + strings.Join(need.Blockers, "; ")
+			return "every label of this metric must survive: " + strings.Join(need.Blockers, "; "), true
 		}
-		return reason, true
+		return "some consumer needs every label", true
 	}
 	// Blockers is documented as "human-readable reasons aggregation is
 	// impossible" -- corpus only ever sets one alongside All today, which

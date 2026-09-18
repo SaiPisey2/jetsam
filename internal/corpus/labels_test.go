@@ -316,3 +316,65 @@ func TestAJoinBelowTheAggregateRefusesButAboveItDoesNot(t *testing.T) {
 		}
 	})
 }
+
+// TestBlockerDistinguishesJetsamsRequirementFromTheConsumersOwn is the other
+// half of what "some consumer needs every label" got wrong: `without` and
+// `ignoring` both refuse because their COMPLEMENT can't be computed here --
+// the consumer explicitly does NOT want the named label -- which is a
+// different, false claim from "the consumer needs every label" (genuinely
+// true of a bare selector, topk or count_values, which never set Blocker).
+// Blocker is what a reader downstream needs to tell the two apart, so it
+// must be set here exactly as it is for the refusals added earlier.
+func TestBlockerDistinguishesJetsamsRequirementFromTheConsumersOwn(t *testing.T) {
+	const m = "jetsam_demo_requests_total"
+
+	t.Run("without sets a blocker naming the complement problem", func(t *testing.T) {
+		got, err := LabelsNeeded(`sum without (pod) (jetsam_demo_requests_total)`, m)
+		if err != nil {
+			t.Fatalf("LabelsNeeded: %v", err)
+		}
+		if got.Blocker == "" {
+			t.Error("Blocker is empty, want a reason -- `without` does not mean the consumer needs every label, it means jetsam cannot compute the complement")
+		}
+	})
+
+	t.Run("ignoring sets a blocker naming the complement problem", func(t *testing.T) {
+		got, err := LabelsNeeded(`sum by (path) (jetsam_demo_requests_total) / ignoring (pod) other_total`, m)
+		if err != nil {
+			t.Fatalf("LabelsNeeded: %v", err)
+		}
+		if got.Blocker == "" {
+			t.Error("Blocker is empty, want a reason -- `ignoring` does not mean the consumer needs every label either")
+		}
+	})
+
+	t.Run("a bare selector sets no blocker -- it genuinely needs every label", func(t *testing.T) {
+		got, err := LabelsNeeded(`jetsam_demo_requests_total`, m)
+		if err != nil {
+			t.Fatalf("LabelsNeeded: %v", err)
+		}
+		if got.Blocker != "" {
+			t.Errorf("Blocker = %q, want empty -- an unaggregated selector genuinely needs every label, so the generic reason is already true", got.Blocker)
+		}
+	})
+
+	t.Run("topk sets no blocker -- it genuinely needs every label", func(t *testing.T) {
+		got, err := LabelsNeeded(`topk(5, jetsam_demo_requests_total)`, m)
+		if err != nil {
+			t.Fatalf("LabelsNeeded: %v", err)
+		}
+		if got.Blocker != "" {
+			t.Errorf("Blocker = %q, want empty -- topk hands back every series with every label, so the generic reason is already true", got.Blocker)
+		}
+	})
+
+	t.Run("count_values sets no blocker -- it genuinely needs every label", func(t *testing.T) {
+		got, err := LabelsNeeded(`count_values("v", jetsam_demo_requests_total)`, m)
+		if err != nil {
+			t.Fatalf("LabelsNeeded: %v", err)
+		}
+		if got.Blocker != "" {
+			t.Errorf("Blocker = %q, want empty -- count_values needs the raw series' every label, so the generic reason is already true", got.Blocker)
+		}
+	})
+}

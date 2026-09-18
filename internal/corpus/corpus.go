@@ -429,9 +429,13 @@ func foldNeeds(needs map[string]*needAccumulator, query string, metrics []string
 		}
 		// need.Blocker names the SPECIFIC reason for a refusal LabelsNeeded
 		// can explain -- an unsupported range function, a subquery, a join
-		// below the aggregate, conflicting claims within one query -- so
-		// that decide.refuse's "some consumer needs every label" sentence
-		// carries the real cause instead of a true-but-useless generic one.
+		// below the aggregate, a `without`/`ignoring` clause, conflicting
+		// claims within one query -- so decide.refuse can tell "some
+		// consumer genuinely needs every label" (true for a bare selector,
+		// topk or count_values, which never set a Blocker) apart from
+		// "jetsam requires every label to survive for some other reason"
+		// (true whenever Blockers is non-empty), and say whichever one
+		// actually holds instead of one sentence flattening both.
 		if need.Blocker != "" {
 			addBlocker(acc, need.Blocker)
 		}

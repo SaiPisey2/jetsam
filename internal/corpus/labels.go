@@ -38,17 +38,20 @@ type LabelNeed struct {
 	// Blocker is a human-readable reason for the refusals this file can
 	// name specifically: an unsupported range function, a subquery, an
 	// instant function applied before aggregation, a vector join below the
-	// aggregate, or two selectors of the same metric in one query making
-	// conflicting claims. Left empty for the refusals whose generic reason
-	// is already accurate (a bare unaggregated selector, `without`, an
-	// aggregator that preserves every series).
+	// aggregate, a `without`/`ignoring` clause whose complement cannot be
+	// computed here, or two selectors of the same metric in one query
+	// making conflicting claims. Left empty for the refusals that genuinely
+	// need every label (a bare unaggregated selector, or an aggregator that
+	// preserves every series -- topk, bottomk, count_values).
 	//
 	// It exists because "some consumer needs every label" is FALSE for a
 	// consumer whose real requirement this file worked out just fine before
-	// an unrelated function or subquery forced the refusal. A reader who
-	// opens the rule and sees `sum by (path)` concludes jetsam is wrong --
-	// worse than no reason at all, and this package has shipped that
-	// mistake before.
+	// an unrelated function, join or clause forced the refusal. A reader
+	// who opens the rule and sees `sum by (path)` concludes jetsam is wrong
+	// -- worse than no reason at all, and this package has shipped that
+	// mistake before. Whether Blocker is set is exactly what lets a reader
+	// downstream (decide.refuse) tell that FALSE case apart from the TRUE
+	// one, so that each refusal states only what actually holds for it.
 	Blocker string
 }
 
@@ -159,8 +162,13 @@ func LabelsNeeded(query, metric string) (LabelNeed, error) {
 			if agg.Without {
 				// `without (pod)` keeps every OTHER label, so everything but
 				// the named ones is required -- which, without knowing the
-				// full label set here, is every label.
+				// full label set here, is every label. That is jetsam's
+				// requirement, though, not the consumer's: the consumer
+				// explicitly does NOT want pod, so "the consumer needs every
+				// label" would be false of it -- record why every label
+				// must survive instead of asserting that.
 				need.All = true
+				need.Blocker = "a `without` clause keeps every label except the ones it names, and the full label set of this metric is not known here to work out what that leaves, so every label must survive"
 				return nil
 			}
 			if reason, unsafe := joinBelowAggregate(path, aggIdx); unsafe {
@@ -203,8 +211,11 @@ func LabelsNeeded(query, metric string) (LabelNeed, error) {
 				// ignoring (x): matching happens on every label EXCEPT x, so
 				// x is the one label that need not agree -- a complement,
 				// same as `without`, which LabelNeed cannot express as a
-				// set. Refuse rather than under-report.
+				// set. Refuse rather than under-report. As with `without`,
+				// this is jetsam's requirement, not a true claim that the
+				// consumer needs x too.
 				need.All = true
+				need.Blocker = "an `ignoring` clause matches on every label except the ones it names, and the full label set of this metric is not known here to work out what that leaves, so every label must survive"
 			}
 			// group_left/right(x) COPIES x from the many-side onto the
 			// result, unlike MatchingLabels which only says what must
