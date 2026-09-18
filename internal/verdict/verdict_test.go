@@ -2,6 +2,7 @@ package verdict
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
@@ -159,5 +160,81 @@ func TestUnreachableGrafanaWithholdsEveryDrop(t *testing.T) {
 	})
 	if res.Verdicts[0].Droppable {
 		t.Error("a drop was licensed while dashboard evidence was configured and unavailable")
+	}
+}
+
+// TestABlockedRuleExplainsItself pins the fix for the dead-code bug: a
+// metric withheld because a rule could not be read must SAY SO. Before the
+// fix, Droppable was only ever set via `!blocked` in the default branch, so
+// the `if blocked && v.Droppable` block that assigns the "blocked: ..."
+// reason could never run, and every withheld metric showed the generic
+// unqueried reason instead.
+func TestABlockedRuleExplainsItself(t *testing.T) {
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "m", Series: 10}}, TotalSeries: 10}
+	res := Compute(inv, corpus.Corpus{
+		Used: map[string]bool{}, Produced: map[string]bool{},
+		LogRead: true, LogQualifies: true,
+		Blocked: []string{"rule g/Broken: parse query: unexpected character"},
+	})
+	v := res.Verdicts[0]
+	if v.Droppable {
+		t.Error("Droppable = true while a rule is blocked, want false")
+	}
+	if !strings.Contains(v.Reason, "blocked: a query could not be read") {
+		t.Errorf("Reason = %q, want it to name the blocked-rule cause", v.Reason)
+	}
+}
+
+// TestUnreachableDashboardsExplainThemselves is the dashboard-cause sibling:
+// a metric withheld because Grafana was configured but unreachable must
+// name THAT cause, not the generic blocked-rule one, and Result must expose
+// DashboardsMissing so the report layer (Task 6) does not have to
+// re-derive it.
+func TestUnreachableDashboardsExplainThemselves(t *testing.T) {
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "m", Series: 10}}, TotalSeries: 10}
+	res := Compute(inv, corpus.Corpus{
+		Used: map[string]bool{}, Produced: map[string]bool{},
+		LogRead: true, LogQualifies: true,
+		DashboardsConfigured: true, DashboardsReachable: false,
+	})
+	v := res.Verdicts[0]
+	if v.Droppable {
+		t.Error("Droppable = true while dashboard evidence is missing, want false")
+	}
+	if !strings.Contains(v.Reason, "dashboard evidence was configured but could not be fetched") {
+		t.Errorf("Reason = %q, want it to name the dashboard cause, not the query cause", v.Reason)
+	}
+	if strings.Contains(v.Reason, "blocked: a query could not be read") {
+		t.Errorf("Reason = %q, wrongly names the query cause instead of the dashboard cause", v.Reason)
+	}
+	if !res.DashboardsMissing {
+		t.Error("Result.DashboardsMissing = false, want true")
+	}
+}
+
+// TestUsedReasonIsUnchangedByTheBlockedFix confirms the restructuring in
+// Compute's default branch did not touch the used/produced branches: their
+// Reason strings and Droppable=false must be exactly as before.
+func TestUsedReasonIsUnchangedByTheBlockedFix(t *testing.T) {
+	inv, c := fixture()
+	got := Compute(inv, c)
+
+	for _, v := range got.Verdicts {
+		switch v.Metric {
+		case "used_metric":
+			if v.Reason != "read by a rule" {
+				t.Errorf("used_metric: Reason = %q, want %q", v.Reason, "read by a rule")
+			}
+			if v.Droppable {
+				t.Error("used_metric: Droppable = true, want false")
+			}
+		case "job:rec":
+			if v.Reason != "written by a recording rule" {
+				t.Errorf("job:rec: Reason = %q, want %q", v.Reason, "written by a recording rule")
+			}
+			if v.Droppable {
+				t.Error("job:rec: Droppable = true, want false")
+			}
+		}
 	}
 }

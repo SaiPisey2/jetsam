@@ -56,6 +56,10 @@ type Result struct {
 	Verdicts        []Verdict
 	Blocked         []string
 	DroppableSeries int
+	// DashboardsMissing is true when dashboard evidence was configured but
+	// could not be fetched, so the report layer can say so without
+	// re-deriving it from the corpus itself.
+	DashboardsMissing bool
 }
 
 // Compute grades every metric in the inventory.
@@ -67,11 +71,11 @@ type Result struct {
 // log proposes nothing at all by default -- the honest outcome, not a
 // broken one.
 func Compute(inv inventory.Inventory, c corpus.Corpus) Result {
-	res := Result{Blocked: c.Blocked}
 	// Dashboard evidence configured but unavailable withholds everything.
 	// "No dashboard reads it" and "nobody looked" produce identical numbers
 	// and opposite meanings.
 	dashboardsMissing := c.DashboardsConfigured && !c.DashboardsReachable
+	res := Result{Blocked: c.Blocked, DashboardsMissing: dashboardsMissing}
 	blocked := len(c.Blocked) > 0 || dashboardsMissing
 	haveQueryLog := c.LogRead && c.LogQualifies
 
@@ -90,8 +94,14 @@ func Compute(inv inventory.Inventory, c corpus.Corpus) Result {
 		default:
 			v.Grade = GradeUnqueried
 			v.Reason = "no rule reads it and no query read it in the window"
-			v.Droppable = !blocked
+			v.Droppable = true
 		}
+
+		// Withheld for a reason the operator can act on. This is the only
+		// place Droppable is negated, so the reason and the decision cannot
+		// drift apart -- an earlier shape set Droppable from !blocked in the
+		// branch above, which made this block unreachable and left every
+		// withheld metric showing the generic reason.
 		if blocked && v.Droppable {
 			v.Droppable = false
 			if dashboardsMissing {

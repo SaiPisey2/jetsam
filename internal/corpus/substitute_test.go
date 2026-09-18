@@ -54,7 +54,9 @@ func TestSubstituteFixesTheVendoredDashboard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read vendored dashboard: %v", err)
 	}
-	var dash struct{ Panels []panelForTest `json:"panels"` }
+	var dash struct {
+		Panels []panelForTest `json:"panels"`
+	}
 	if err := json.Unmarshal(b, &dash); err != nil {
 		t.Fatalf("parse dashboard: %v", err)
 	}
