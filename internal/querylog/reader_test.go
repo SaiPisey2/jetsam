@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -285,5 +286,64 @@ func TestATrailingNewlineIsNotAnError(t *testing.T) {
 
 	if _, err := Read(filepath.Join(dir, "queries.log")); err != nil {
 		t.Fatalf("Read: %v -- a well-formed file ending in a newline must not error", err)
+	}
+}
+
+// TestARuleLineMentioningHTTPRequestIsStillNotARead pins the mirror of the
+// prefilter's asymmetry, which was asserted by construction and never
+// tested. The prefilter selects POSITIVELY on "httpRequest" because
+// false-rejecting a genuine read is the dangerous direction -- so a RULE
+// evaluation whose query text happens to contain that literal passes the
+// prefilter and reaches json.Unmarshal, where the top-level key is absent
+// and the entry is correctly dropped. Both halves of the asymmetry matter:
+// a read is never rejected for its text, and a rule is never accepted for
+// its text.
+func TestARuleLineMentioningHTTPRequestIsStillNotARead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "queries.log")
+	lines := []string{
+		`{"time":"2026-09-18T07:50:40.382844049Z","params":{"query":"up{path=\"httpRequest\"} > 0"},"ruleGroup":{"file":"/etc/prometheus/rules/x.yaml","name":"x"}}`,
+		`{"time":"2026-09-18T08:50:40.382844049Z","params":{"query":"real_read_total"},"httpRequest":{"method":"POST","path":"/api/v1/query"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(r.Queries) != 1 || r.Queries[0] != "real_read_total" {
+		t.Errorf("Queries = %v, want only the genuine read", r.Queries)
+	}
+	// Both lines still count towards coverage: a rule evaluation is not a
+	// read, but it is just as good evidence the log was running.
+	if r.Entries != 2 {
+		t.Errorf("Entries = %d, want 2", r.Entries)
+	}
+	if r.Span != time.Hour {
+		t.Errorf("Span = %s, want 1h", r.Span)
+	}
+}
+
+// TestReadingReportsTheEndOfItsCoverage: a span says how long the log
+// covers, never when it stopped. A glob matching only last year's rotated
+// archives satisfies any minimum window while saying nothing about today.
+func TestReadingReportsTheEndOfItsCoverage(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "queries.log")
+	lines := []string{
+		`{"time":"2026-09-18T07:00:00Z","params":{"query":"up"},"ruleGroup":{"file":"x","name":"x"}}`,
+		`{"time":"2026-09-18T09:00:00Z","params":{"query":"up"},"ruleGroup":{"file":"x","name":"x"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	want := time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC)
+	if !r.End.Equal(want) {
+		t.Errorf("End = %s, want %s", r.End, want)
 	}
 }

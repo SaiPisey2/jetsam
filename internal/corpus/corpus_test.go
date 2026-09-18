@@ -211,3 +211,123 @@ func TestAShortLogDoesNotQualify(t *testing.T) {
 		t.Error("a one-hour log must not qualify")
 	}
 }
+
+// TestAnUnparseableLoggedQueryIsContainedAndReported: the query log is the
+// one source whose SILENCE licenses a deletion, and it had the weakest
+// handling of the three -- a query that would not parse was silently
+// continued past, recorded nowhere. Rules are fatal and dashboard panels
+// get a lexical fallback; this gives logged queries the same fallback and
+// makes the failure visible.
+func TestAnUnparseableLoggedQueryIsContainedAndReported(t *testing.T) {
+	all := []string{"logged_metric", "other_metric"}
+	c := Build(Sources{
+		QueryLog: &querylog.Reading{
+			Queries: []string{`rate(logged_metric[`, "other_metric"},
+			Span:    800 * time.Hour,
+		},
+		LogQualifies: true,
+	}, all)
+
+	if len(c.Blocked) != 0 {
+		t.Errorf("an unparseable logged query was fatal: %v", c.Blocked)
+	}
+	if len(c.QueryLogUnparsed) != 1 {
+		t.Fatalf("QueryLogUnparsed = %v, want exactly one entry", c.QueryLogUnparsed)
+	}
+	if !strings.Contains(c.QueryLogUnparsed[0], "query log") {
+		t.Errorf("QueryLogUnparsed entry %q does not say which source it came from", c.QueryLogUnparsed[0])
+	}
+	// The conservative fallback: the metric named in the query it could
+	// not parse is still protected, exactly as a malformed panel's is.
+	if !c.Used["logged_metric"] {
+		t.Error("logged_metric: Used = false -- an unparseable logged query did not protect the metric it names")
+	}
+	if !c.Used["other_metric"] {
+		t.Error("other_metric: Used = false -- the parseable query beside it was not read")
+	}
+}
+
+// TestUsedByNamesTheSourceThatReadEachMetric is what makes a verdict's
+// reason true. The corpus was rules-only when that sentence was written
+// and has not been since; a metric only a dashboard reads must not be
+// reported as read by a rule.
+func TestUsedByNamesTheSourceThatReadEachMetric(t *testing.T) {
+	all := []string{"rule_metric", "dash_metric", "logged_metric", "shared_metric"}
+	c := Build(Sources{
+		Rules: []promapi.Rule{
+			{Group: "g", Name: "r", Type: "alerting", Query: `rule_metric > 0`},
+			{Group: "g", Name: "s", Type: "alerting", Query: `shared_metric > 0`},
+		},
+		Dashboards: []grafana.Dashboard{{UID: "d", Title: "D",
+			Queries: []string{`rate(dash_metric[5m])`, `shared_metric`}}},
+		QueryLog:             &querylog.Reading{Queries: []string{"logged_metric"}, Span: 800 * time.Hour},
+		LogQualifies:         true,
+		DashboardsConfigured: true, DashboardsReachable: true,
+	}, all)
+
+	for metric, want := range map[string]string{
+		"rule_metric":   "read by a rule",
+		"dash_metric":   "read by a dashboard",
+		"logged_metric": "read by a logged query",
+		"shared_metric": "read by a rule and a dashboard",
+	} {
+		if got := c.UsedBy[metric].Reason(); got != want {
+			t.Errorf("%s: reason = %q, want %q", metric, got, want)
+		}
+	}
+}
+
+func TestSourceListNamesOnlyTheSourcesActuallyUsed(t *testing.T) {
+	rules := []promapi.Rule{{Group: "g", Name: "r", Type: "alerting", Query: `up > 0`}}
+	for _, tc := range []struct {
+		name string
+		src  Sources
+		want string
+	}{
+		{"rules alone", Sources{Rules: rules}, "rules"},
+		{"rules and dashboards", Sources{Rules: rules,
+			DashboardsConfigured: true, DashboardsReachable: true}, "rules and dashboards"},
+		{"rules and log", Sources{Rules: rules,
+			QueryLog: &querylog.Reading{}}, "rules and the query log"},
+		{"all three", Sources{Rules: rules, QueryLog: &querylog.Reading{},
+			DashboardsConfigured: true, DashboardsReachable: true}, "rules, dashboards and the query log"},
+		// Configured and unreachable contributed nothing, so naming it
+		// would overstate the corpus to whoever approves the deletion.
+		{"dashboards unreachable", Sources{Rules: rules, DashboardsConfigured: true}, "rules"},
+	} {
+		if got := Build(tc.src, nil).SourceList(); got != tc.want {
+			t.Errorf("%s: SourceList = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestLogShortfallTellsTheThreeStatesApart(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		c    Corpus
+		want string
+	}{
+		{"none configured", Corpus{}, "no query log is configured"},
+		{"configured but short", Corpus{LogRead: true, LogSpan: 3 * time.Hour},
+			"the query log covers only 3h0m0s, short of the configured minimum"},
+		{"unreadable", Corpus{LogUnreadable: true}, "the query log is configured but could not be read"},
+		{"qualifies", Corpus{LogRead: true, LogQualifies: true, LogSpan: 800 * time.Hour}, ""},
+	} {
+		if got := tc.c.LogShortfall(); got != tc.want {
+			t.Errorf("%s: LogShortfall = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestAnUnreadableLogIsNotAnEmptyOne: an empty log says nobody queried
+// anything, which licenses dropping everything. An unreadable one must say
+// the opposite.
+func TestAnUnreadableLogIsNotAnEmptyOne(t *testing.T) {
+	c := Build(Sources{QueryLogUnreadable: true}, nil)
+	if !c.LogUnreadable {
+		t.Error("LogUnreadable = false, want true")
+	}
+	if c.LogRead || c.LogQualifies {
+		t.Errorf("LogRead = %v, LogQualifies = %v -- an unreadable log must not look like evidence", c.LogRead, c.LogQualifies)
+	}
+}

@@ -37,6 +37,13 @@ type Reading struct {
 	// evaluations, so that ordinary case is the common one, not an edge
 	// case.
 	Span time.Duration
+	// End is the timestamp of the latest entry across every matched file.
+	// Span says how much time the log covers; End says when that coverage
+	// stopped. A glob that matches only last year's rotated archives has a
+	// perfectly good span and tells you nothing about today, and nothing in
+	// jetsam refuses on that -- so End exists to make the gap visible to
+	// whoever is being asked to approve a deletion.
+	End time.Time
 	// Files is how many files the glob matched, and Entries how many lines
 	// were examined. Both are reported so an operator can tell a log that
 	// covers a month from one that was rotated away yesterday.
@@ -163,6 +170,7 @@ func Read(glob string) (*Reading, error) {
 	r := &Reading{Queries: out, Files: len(paths), Entries: entries}
 	if !earliest.IsZero() && !latest.IsZero() {
 		r.Span = latest.Sub(earliest)
+		r.End = latest
 	}
 	return r, nil
 }
