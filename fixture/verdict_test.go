@@ -4,20 +4,51 @@ package fixture
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
+	"github.com/SaiPisey2/jetsam/internal/grafana"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
 	"github.com/SaiPisey2/jetsam/internal/promapi"
+	"github.com/SaiPisey2/jetsam/internal/querylog"
 	"github.com/SaiPisey2/jetsam/internal/verdict"
 )
 
-// grade runs jetsam's real pipeline against the running stack and returns
-// every metric's grade. Going through the actual packages rather than
-// re-deriving the answer here is the point: a test that recomputes the
-// verdict is the algorithm typed twice.
-func grade(t *testing.T) map[string]verdict.Grade {
+// grafanaURL is the fixture's Grafana, reachable the same way stack_test.go
+// reaches it.
+const grafanaURL = "http://localhost:3000"
+
+// demoLogMinWindow is this fixture's stand-in for the configured
+// query_log.min_window a real install would set (720h by default -- see
+// internal/config). The fixture's log has only been running since `make
+// demo-up`, not 30 days, so pinning that default here would make
+// LogQualifies false forever and the query log would never be exercised.
+// This value is not asserted anywhere; it only has to be short enough that
+// the fixture's own log -- which fixture/ready.sh already waited to become
+// measurable before this test runs -- qualifies.
+const demoLogMinWindow = 1 * time.Minute
+
+// grafanaToken reads the service-account token fixture/grafana/token.sh
+// wrote during `make demo-up`. Production reads the same credential from
+// $GRAFANA_TOKEN (see cmd/jetsam/main.go's gather); nothing sets that
+// variable for `go test`, so the fixture reads the file directly.
+func grafanaToken(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("grafana/.token")
+	if err != nil {
+		t.Fatalf("no grafana token, run `make demo-up`: %v", err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// liveSources gathers every evidence source jetsam's production code
+// gathers -- rules, dashboards, and the query log -- against the running
+// stack, mirroring cmd/jetsam/main.go's gather rather than re-deriving a
+// second, divergent wiring of the same three sources.
+func liveSources(t *testing.T) (inventory.Inventory, corpus.Sources) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -32,11 +63,45 @@ func grade(t *testing.T) map[string]verdict.Grade {
 		t.Fatalf("rules: %v", err)
 	}
 	inv := inventory.Build(status)
+
+	src := corpus.Sources{Rules: rules, DashboardsConfigured: true}
+	g := grafana.New(grafanaURL, grafanaToken(t), 2*time.Minute)
+	dash, err := g.Dashboards(ctx)
+	if err != nil {
+		t.Fatalf("grafana dashboards, run `make demo-up`: %v", err)
+	}
+	src.Dashboards = dash
+	src.DashboardsReachable = true
+
+	reading, err := querylog.Read("querylog/queries.log")
+	if err != nil {
+		t.Fatalf("query log, run `make demo-up`: %v", err)
+	}
+	src.QueryLog = reading
+	if reading != nil {
+		src.LogQualifies = reading.Span >= demoLogMinWindow
+	}
+
+	return inv, src
+}
+
+// metricNames extracts every metric name in the shape corpus.Build wants.
+func metricNames(inv inventory.Inventory) []string {
 	names := make([]string, 0, len(inv.Metrics))
 	for _, m := range inv.Metrics {
 		names = append(names, m.Name)
 	}
-	res := verdict.Compute(inv, corpus.Build(corpus.Sources{Rules: rules}, names))
+	return names
+}
+
+// grade runs jetsam's real pipeline against the running stack and returns
+// every metric's grade. Going through the actual packages rather than
+// re-deriving the answer here is the point: a test that recomputes the
+// verdict is the algorithm typed twice.
+func grade(t *testing.T) map[string]verdict.Grade {
+	t.Helper()
+	inv, src := liveSources(t)
+	res := verdict.Compute(inv, corpus.Build(src, metricNames(inv)))
 
 	out := make(map[string]verdict.Grade, len(res.Verdicts))
 	for _, v := range res.Verdicts {
@@ -62,22 +127,22 @@ func TestKnownArchetypesGradeCorrectly(t *testing.T) {
 			want:   verdict.GradeUsed,
 			why:    "the vendored node-exporter rules read it",
 		},
-		// This is the intended canary for the arrival of dashboards in the
-		// corpus. No vendored RULE names this metric, which is why it is
-		// unreferenced today -- but dashboard 1860 does name it, in one of
-		// the panel queries that parse without substitution. When
-		// sub-project B adds dashboards, this case is meant to flip to
-		// used, and that flip is the signal that the corpus widened, not a
-		// stale expectation to be quietly corrected.
+		// This was the canary for the arrival of dashboards in the corpus.
+		// No vendored RULE names this metric -- it graded unreferenced
+		// through v0.1, when the corpus was rules only -- but dashboard
+		// 1860 does name it, in one of the panel queries that parse
+		// without substitution. Now that the corpus reads dashboards, this
+		// is the flip that proves it: the acceptance test for this whole
+		// sub-project, not a stale expectation quietly corrected.
 		{
 			metric: "node_scrape_collector_duration_seconds",
-			want:   verdict.GradeUnreferenced,
-			why:    "no vendored rule names it, and v0.1's corpus is rules only -- dashboard 1860 does name it",
+			want:   verdict.GradeUsed,
+			why:    "dashboard 1860 reads it, in a panel query that parses without substitution",
 		},
 		{
 			metric: "jetsam_demo_requests_total",
-			want:   verdict.GradeUnreferenced,
-			why:    "only a dashboard reads it, and v0.1's corpus is rules only",
+			want:   verdict.GradeUsed,
+			why:    "a dashboard reads it -- the corpus is no longer rules only",
 		},
 		// This case exists to exercise verdict.Compute's Produced branch --
 		// the rule that stops jetsam proposing a drop for a metric one of
@@ -162,5 +227,33 @@ func TestTheCorpusBlocksNothing(t *testing.T) {
 	}
 	if c.Queries != wantRules {
 		t.Errorf("corpus read %d queries, want %d (see fixture/VENDOR.md)", c.Queries, wantRules)
+	}
+}
+
+// A log shorter than the configured minimum must not license a drop, however
+// complete it looks.
+func TestAShortQueryLogLicensesNothing(t *testing.T) {
+	inv, src := liveSources(t)
+	src.LogQualifies = false
+	res := verdict.Compute(inv, corpus.Build(src, metricNames(inv)))
+	for _, v := range res.Verdicts {
+		if v.Droppable {
+			t.Fatalf("%s was droppable with a non-qualifying log", v.Metric)
+		}
+	}
+}
+
+// Grafana configured but unreachable withholds every drop while scan still
+// works.
+func TestUnreachableGrafanaWithholdsEveryDrop(t *testing.T) {
+	inv, src := liveSources(t)
+	src.DashboardsConfigured = true
+	src.DashboardsReachable = false
+	src.Dashboards = nil
+	res := verdict.Compute(inv, corpus.Build(src, metricNames(inv)))
+	for _, v := range res.Verdicts {
+		if v.Droppable {
+			t.Fatalf("%s was droppable while dashboard evidence was unavailable", v.Metric)
+		}
 	}
 }

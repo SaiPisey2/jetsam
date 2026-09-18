@@ -121,3 +121,42 @@ The log also grows fast, on the order of half a megabyte in the first few
 minutes at this stack's 15s evaluation interval, so B should expect a
 large file from a long-running stack and read it as a stream rather than
 all at once.
+
+The counts quoted above (API-vs-rule-evaluation ratios, log growth rate)
+remain unpinned observations, not assertions. `fixture/stack_test.go`'s
+`TestQueryLogCapturesTheKnownQueries` still only checks that the three
+known queries are present and logs the breakdown; nothing in the suite
+fails if the ratio moves, because it is a property of how long the stack
+has been running, not of the fixture's configuration.
+
+## The dashboard canary
+
+`fixture/verdict_test.go`'s `grade()` now builds its corpus from all
+three sources -- rules, dashboards (authenticated with the token
+`fixture/grafana/token.sh` writes), and the query log -- mirroring
+`cmd/jetsam/main.go`'s `gather`, instead of rules alone.
+
+Two metrics were pinned as `unreferenced` specifically because v0.1's
+corpus was rules only, and were documented as the canaries for the moment
+dashboards entered the corpus. Both now grade `used`, in
+`TestKnownArchetypesGradeCorrectly`:
+
+| Metric | Was | Now | Why |
+| --- | --- | --- | --- |
+| `jetsam_demo_requests_total` | `unreferenced` | `used` | only a dashboard (`loadgen`) reads it |
+| `node_scrape_collector_duration_seconds` | `unreferenced` | `used` | dashboard 1860 reads it, in one of the 160 panel queries that parse without substitution |
+
+That flip is the acceptance test for this whole sub-project: a canary
+that did not sing would mean the dashboards were not really in the
+corpus, regardless of anything else passing.
+
+A differential oracle, `fixture/oracle_test.go`, checks jetsam's answer
+against `mimirtool analyze grafana` + `analyze prometheus` -- an
+independent implementation of the dashboard half of this question. It
+asserts jetsam's used-set is a superset of mimirtool's dashboard-derived
+set and logs the rest; jetsam's wider set (rules, the recording-rule
+closure, and the query log, on top of dashboards) is expected to contain
+metrics mimirtool's dashboard-only view does not. `mimirtool analyze
+ruler` does not work against a plain Prometheus -- it calls a Mimir
+ruler API a plain Prometheus does not serve -- so the oracle covers
+dashboards only.
