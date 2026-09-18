@@ -576,11 +576,10 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 
 // eligibleForDrop reports whether v should be treated as droppable for this
 // run of propose. verdict.Compute already decided v.Droppable under
-// whatever evidence it had -- a query log, when there is one, which v0.1
-// never wires in, so v.Droppable is always false here on its own. This
-// function only ever WIDENS that decision, and only for the one grade an
-// operator can explicitly choose to accept without that evidence:
-// GradeUnreferenced, when includeUnreferenced was passed.
+// whatever evidence it had -- rules, dashboards and a qualifying query log,
+// when configured. This function only ever WIDENS that decision, and only
+// for the one grade an operator can explicitly choose to accept without
+// full evidence: GradeUnreferenced, when includeUnreferenced was passed.
 //
 // It never widens a GradeUsed verdict -- a rule reads the metric, or a
 // recording rule writes it -- because that grade means something read it,

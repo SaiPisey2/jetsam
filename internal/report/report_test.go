@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
+	"github.com/SaiPisey2/jetsam/internal/grafana"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
 	"github.com/SaiPisey2/jetsam/internal/promapi"
+	"github.com/SaiPisey2/jetsam/internal/querylog"
 	"github.com/SaiPisey2/jetsam/internal/verdict"
 )
 
@@ -211,5 +213,43 @@ func TestScanSaysDashboardsMissingIsWhyNothingIsDroppable(t *testing.T) {
 	}
 	if strings.Contains(out, "every metric is referenced by a rule or was read within the query-log window") {
 		t.Errorf("report falls through to the misleading default explanation:\n%s", out)
+	}
+}
+
+// TestScanHeaderAttributesQueriesToAllThreeSources pins the "Queries" header
+// line against a corpus actually built from all three evidence sources --
+// rules, a dashboard, and a query log -- so the header cannot silently drift
+// back to naming only rules the way it did before this fix: corpus.Queries
+// sums all three, and on the live fixture the header once read "739 read
+// from rules" when 285 of those queries came from Grafana.
+func TestScanHeaderAttributesQueriesToAllThreeSources(t *testing.T) {
+	rules := []promapi.Rule{{Group: "g", Name: "r", Type: "alerting", Query: `up == 0`}}
+	dashboards := []grafana.Dashboard{{
+		UID: "d", Title: "D",
+		Queries: []string{`rate(dashboard_only_metric[5m])`},
+	}}
+	reading := &querylog.Reading{Queries: []string{"logged_only_metric"}, Span: 720 * time.Hour}
+
+	src := corpus.Sources{
+		Rules: rules, Dashboards: dashboards, QueryLog: reading,
+		LogQualifies: true, DashboardsConfigured: true, DashboardsReachable: true,
+	}
+	allMetrics := []string{"up", "dashboard_only_metric", "logged_only_metric", "unread_metric"}
+	c := corpus.Build(src, allMetrics)
+	// Sanity: this really is a mixed corpus -- one query from each source.
+	if c.Queries != 3 {
+		t.Fatalf("test setup: c.Queries = %d, want 3 (one rule, one dashboard panel, one logged query)", c.Queries)
+	}
+
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "unread_metric", Series: 1}}, TotalSeries: 1}
+	var b bytes.Buffer
+	Scan(&b, inv, c, verdict.Compute(inv, c))
+	out := b.String()
+
+	if !strings.Contains(out, "Queries    3 read from rules, dashboards and query log") {
+		t.Errorf("header does not attribute queries to all three sources:\n%s", out)
+	}
+	if strings.Contains(out, "Queries    3 read from rules\n") {
+		t.Errorf("header still attributes every query to rules alone:\n%s", out)
 	}
 }

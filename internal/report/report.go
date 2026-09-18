@@ -23,7 +23,7 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 	}
 	fmt.Fprintf(w, "Metrics    %d\n", len(inv.Metrics))
 	fmt.Fprintf(w, "Series     %d\n", inv.TotalSeries)
-	fmt.Fprintf(w, "Queries    %d read from rules\n", c.Queries)
+	fmt.Fprintf(w, "Queries    %d read from rules, dashboards and query log\n", c.Queries)
 	if res.DroppableSeries > 0 {
 		fmt.Fprintf(w, "Droppable  %d series (%.1f%% of stored)\n",
 			res.DroppableSeries, 100*inv.Share(res.DroppableSeries))
