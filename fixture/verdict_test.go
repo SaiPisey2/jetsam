@@ -307,10 +307,17 @@ func TestRecordingRuleOutputsAreProtected(t *testing.T) {
 	}
 }
 
-// TestTheCorpusBlocksNothing records a property worth knowing before
-// sub-project B changes it: with rules as the only corpus, every query
-// parses and nothing is blocked. B adds dashboards, whose queries do NOT
-// parse, and this test is where that change becomes visible.
+// TestTheCorpusBlocksNothing records one property of the RULES source
+// alone: every rule this fixture loads parses, so Blocked stays empty and
+// the query count matches the vendored rule total.
+//
+// It is not where an unparseable dashboard becomes visible, and never
+// was: the corpus it builds has no Dashboards at all, and a dashboard
+// that does not parse is contained in DashboardPanelsUnparsed rather than
+// Blocked by design -- one malformed panel in a large Grafana install
+// must not make every drop unreachable. The dashboard side is covered by
+// TestVendoredDashboardCarriesTheTemplateVariableHazard in vendor_test.go
+// and by internal/corpus's own tests.
 func TestTheCorpusBlocksNothing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

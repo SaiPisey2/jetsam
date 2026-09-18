@@ -205,6 +205,14 @@ would have caught the gap described below before it shipped.
 
 ### Differential oracle against mimirtool
 
+**This oracle is a local-only check. It does not run in CI.** The
+workflow does not install mimirtool, and the test skips cleanly when it
+is not on `PATH`, so a green CI run says nothing about it. Running it is
+a deliberate act: install mimirtool, then
+`go test -tags integration ./fixture/ -run TestMimirtool` against the
+running stack. Treat a claim that "the oracle passes" as unsupported
+unless somebody ran it by hand and said so.
+
 A differential oracle, `fixture/oracle_test.go`, checks jetsam's answer
 against `mimirtool analyze grafana` + `analyze prometheus` -- an
 independent implementation of the dashboard half of this question. It is
@@ -241,14 +249,18 @@ is a Grafana template function, not PromQL, so this reliably takes the
 same conservative fallback an unparseable panel does, reported under
 `Corpus.DashboardVariablesUnparsed` rather than
 `DashboardPanelsUnparsed` so an operator does not read it as a broken
-panel. On the vendored dashboard this adds exactly two names to the
-dashboards-only used-set: `node_uname_info` (the fix), and a harmless
-`prometheus` from the `ds_prometheus` datasource variable's plain-string
-query -- which is not a real metric in this fixture's inventory, so it
-never affects any verdict (`Refs.Resolve` already hits every literally-
-named string in `r.Names` regardless of whether it exists in `allMetrics`;
-this is pre-existing `internal/corpus` behavior, not something this fix
-introduced). `TestKnownArchetypesGradeCorrectly`,
+panel. Only the COUNT of that list reaches an operator, with its
+explanation attached: three of this dashboard's four variables land there
+on a perfectly healthy install, so naming them would print three
+broken-looking lines on every scan of a working system.
+
+On the vendored dashboard this adds exactly one name to the
+dashboards-only used-set: `node_uname_info`. The `ds_prometheus`
+datasource variable is no longer collected at all -- its `query` field is
+the plain string `prometheus`, a datasource name rather than PromQL, and
+`templating.list[].type` says so -- which keeps a phantom `prometheus`
+out of the used-set and keeps the datasource entry out of the query total
+a pull request quotes as its evidence. `TestKnownArchetypesGradeCorrectly`,
 `TestDashboardVariablesAreUsedWithNoQueryLogAtAll` in
 `fixture/verdict_test.go`, and equivalent unit tests in
 `internal/grafana` and `internal/corpus` cover it. With the gap closed,

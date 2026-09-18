@@ -42,9 +42,11 @@ import (
 // Verified by hand against this fixture; do not spend time wiring it in,
 // there is no rules half of this oracle to have.
 //
-// mimirtool is not a build dependency -- go.mod is untouched by this
-// task -- so this test skips cleanly when it is not on PATH rather than
-// failing the suite for an operator who has not installed it.
+// mimirtool is not a build dependency -- go.mod is untouched -- so this
+// test skips cleanly when it is not on PATH rather than failing the suite
+// for an operator who has not installed it. CI does not install it, so
+// this oracle NEVER runs there: it is a local check somebody has to run
+// deliberately, not a gate anything is held to. See fixture/VENDOR.md.
 func TestMimirtoolAgreesDashboardsAreUsed(t *testing.T) {
 	if _, err := exec.LookPath("mimirtool"); err != nil {
 		t.Skip("mimirtool not on PATH; skipping the differential oracle")
