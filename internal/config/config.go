@@ -63,7 +63,13 @@ query_log:
   path: ""
   # How long the log must cover before its silence counts as evidence. A Go
   # duration string: "720h" is 30 days. "30d" is NOT valid and will fail to
-  # parse -- d is not a Go duration unit.
+  # parse -- d is not a Go duration unit, and neither is a negative value,
+  # which is refused rather than defaulted.
+  #
+  # Note that Prometheus' query log records PromQL ENGINE queries only. A
+  # metric read through the label-values or series endpoints -- how Grafana
+  # resolves a dashboard's variables -- never appears in it, so set
+  # grafana.url alongside this rather than instead of it.
   min_window: 720h
 
 # Required by "jetsam propose". Path, inside a git checkout, of the scrape
@@ -112,6 +118,14 @@ func Load(path string) (Config, error) {
 	}
 	if c.Prometheus.MetricLimit == 0 {
 		c.Prometheus.MetricLimit = 5000
+	}
+	// Only zero means "unset"; a negative value is a mistake that must be
+	// refused rather than defaulted away. "min_window: -1h" survived the
+	// zero check, and then "Span 0 >= -1h" qualified an empty log, which
+	// grades every unread metric unqueried and licenses dropping all of
+	// them -- the worst outcome this program has, reached by a typo.
+	if c.QueryLog.MinWindow < 0 {
+		return Config{}, fmt.Errorf("query_log.min_window must not be negative, got %s", c.QueryLog.MinWindow)
 	}
 	if c.QueryLog.MinWindow == 0 {
 		c.QueryLog.MinWindow = 720 * time.Hour

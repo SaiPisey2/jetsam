@@ -76,3 +76,23 @@ func TestGrafanaTokenIsNotAConfigField(t *testing.T) {
 		t.Error("config has a token field; credentials come from the environment only")
 	}
 }
+
+// TestNegativeMinWindowIsRefused: Load defaulted min_window only when it
+// was zero, so "min_window: -1h" survived intact. A span of 0 then
+// satisfies "Span >= -1h", which qualifies an empty query log, which
+// grades every unread metric unqueried and licenses dropping all of them.
+// The worst outcome this program has, reached by a typo.
+func TestNegativeMinWindowIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jetsam.yaml")
+	if err := os.WriteFile(path, []byte("prometheus:\n  url: http://localhost:9090\nquery_log:\n  path: /tmp/q.log\n  min_window: -1h\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err == nil {
+		t.Fatalf("Load accepted min_window = %s, want an error", cfg.QueryLog.MinWindow)
+	}
+	if !strings.Contains(err.Error(), "min_window") {
+		t.Errorf("error %q does not name the offending field", err)
+	}
+}
