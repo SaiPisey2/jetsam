@@ -93,12 +93,11 @@ func TestDashboardsCollectsVariableQueriesBothShapes(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d dashboards, want 1", len(got))
 	}
-	// ds_prometheus is a datasource variable: its "query" field is the
-	// plain string "prometheus", a datasource UID rather than a metric
-	// query. It is collected all the same -- extraction does not need to
-	// know a variable's type to be safe, since a plain non-PromQL string
-	// resolves to no known metric downstream -- which is exactly why this
-	// test checks for it rather than pretending it does not exist.
+	// None of these entries carries a "type", which is the shape this
+	// test is about: an entry whose type is unknown is read, since
+	// reading one extra string can only widen what looks used. A typed
+	// datasource variable is excluded instead -- see
+	// TestDatasourceVariablesAreNotCountedAsQueries.
 	want := map[string]bool{
 		"prometheus":                         true,
 		"label_values(node_uname_info, job)": true,
@@ -216,5 +215,29 @@ func TestANullDashboardBodyIsAnError(t *testing.T) {
 	)
 	if _, err := c.Dashboards(context.Background()); err == nil {
 		t.Fatal("want an error for a null dashboard body, got nil")
+	}
+}
+
+// TestDatasourceVariablesAreNotCountedAsQueries: a datasource variable's
+// query field is the plain string "prometheus" -- a datasource name, not
+// PromQL. Counting it inflates the query total a pull request quotes as
+// its evidence, and it parses as a vector selector, so it also adds a
+// phantom read of a metric called "prometheus".
+func TestDatasourceVariablesAreNotCountedAsQueries(t *testing.T) {
+	c := stub(t,
+		`[{"uid":"a","title":"A"}]`,
+		map[string]string{"a": `{"dashboard":{"uid":"a","title":"A","panels":[],"templating":{"list":[
+			{"name":"ds_prometheus","type":"datasource","query":"prometheus"},
+			{"name":"interval","type":"interval","query":"1m,5m"},
+			{"name":"job","type":"query","query":"label_values(node_uname_info, job)"}
+		]}}}`},
+	)
+	got, err := c.Dashboards(context.Background())
+	if err != nil {
+		t.Fatalf("Dashboards: %v", err)
+	}
+	want := []string{"label_values(node_uname_info, job)"}
+	if len(got[0].VariableQueries) != len(want) || got[0].VariableQueries[0] != want[0] {
+		t.Errorf("VariableQueries = %v, want %v", got[0].VariableQueries, want)
 	}
 }

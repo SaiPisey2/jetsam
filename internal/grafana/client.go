@@ -177,7 +177,18 @@ func collect(ps []panel, out *[]string) {
 // json.RawMessage and trying both shapes handles either without needing
 // to know up front which one a given entry uses.
 type templateVar struct {
+	Type  string          `json:"type"`
 	Query json.RawMessage `json:"query"`
+}
+
+// isQueryVar reports whether a template variable's query field is meant to
+// be a query at all. A datasource variable's query is the plain string
+// "prometheus" -- a datasource name, not PromQL -- and counting it inflates
+// the query total a pull request quotes as its evidence. An entry with no
+// type at all is treated as a query: unknown shapes err towards being read,
+// since reading one extra string can only widen what looks used.
+func isQueryVar(v templateVar) bool {
+	return v.Type == "" || v.Type == "query"
 }
 
 // variableQuery extracts one template variable's query text, handling
@@ -245,6 +256,9 @@ func (c *Client) Dashboards(ctx context.Context) ([]Dashboard, error) {
 
 		var vqs []string
 		for _, v := range body.Dashboard.Templating.List {
+			if !isQueryVar(v) {
+				continue
+			}
 			if q := variableQuery(v.Query); q != "" {
 				vqs = append(vqs, q)
 			}
