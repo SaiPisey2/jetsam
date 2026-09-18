@@ -214,3 +214,76 @@ func TestParseTimeHandlesTimezoneOffsets(t *testing.T) {
 		t.Errorf("Span = %v, want %v -- the +05:00 offset must be applied, not dropped", r.Span, want)
 	}
 }
+
+// Span must not trust physical file order. An inflated span is the dangerous
+// direction -- it can push a log past the trust threshold and license a drop
+// it should not -- so the bound has to be a running min/max over every
+// entry's actual parsed time, not whichever line happens to come first or
+// last on disk.
+func TestSpanIsCorrectWhenLinesAreOutOfOrder(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "queries.log",
+		entry("2026-08-31T00:00:00Z", "physically_first_but_latest", "rule")+
+			entry("2026-08-15T00:00:00Z", "middle", "rule")+
+			entry("2026-08-01T00:00:00Z", "physically_last_but_earliest", "rule"))
+
+	r, err := Read(filepath.Join(dir, "queries.log"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	want := 30 * 24 * time.Hour
+	if r.Span != want {
+		t.Errorf("Span = %v, want %v -- physical position in the file must not matter", r.Span, want)
+	}
+}
+
+// Same as above, but mixing kinds and physical order together, since the
+// running min/max has to hold regardless of which kind of entry carries the
+// true extreme.
+func TestSpanIgnoresPhysicalPositionAcrossKinds(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "queries.log",
+		entry("2026-08-20T00:00:00Z", "mid_read", "read")+
+			entry("2026-08-31T00:00:00Z", "latest_rule", "rule")+
+			entry("2026-08-01T00:00:00Z", "earliest_rule", "rule")+
+			entry("2026-08-10T00:00:00Z", "another_read", "read"))
+
+	r, err := Read(filepath.Join(dir, "queries.log"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	want := 30 * 24 * time.Hour
+	if r.Span != want {
+		t.Errorf("Span = %v, want %v -- span must track the true earliest/latest regardless of physical order or kind", r.Span, want)
+	}
+}
+
+// A truncated or garbled line buried in the middle of the file -- not the
+// physically first or last line -- must still be caught. A log that cannot
+// be fully read is an error, never an entry silently dropped; a corrupted
+// rule-evaluation line (the ~100% case on a real log) must not be absorbed
+// as an unremarkable entry just because it never reaches the httpRequest
+// prefilter's JSON decode.
+func TestAMalformedRuleLineIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "queries.log",
+		entry("2026-08-01T00:00:00Z", "opening", "rule")+
+			`{"time":"2026-08-15T00:00:00`+"\n"+ // truncated mid-write: no closing quote
+			entry("2026-08-31T00:00:00Z", "closing", "rule"))
+
+	if _, err := Read(filepath.Join(dir, "queries.log")); err == nil {
+		t.Fatal("want an error on a truncated rule-shaped line buried in the file -- it must not be silently absorbed as an ordinary entry")
+	}
+}
+
+// The fix for the above must not over-reject: a file ending in a single
+// trailing newline, which is the ordinary way a log file is terminated, must
+// not be mistaken for an unparseable final line.
+func TestATrailingNewlineIsNotAnError(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "queries.log", entry("2026-08-01T00:00:00Z", "trailing_newline_ok", "read"))
+
+	if _, err := Read(filepath.Join(dir, "queries.log")); err != nil {
+		t.Fatalf("Read: %v -- a well-formed file ending in a newline must not error", err)
+	}
+}

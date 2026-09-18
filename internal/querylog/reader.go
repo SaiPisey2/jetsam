@@ -99,9 +99,12 @@ const timeFieldPrefix = `{"time":"`
 // extractTime pulls the raw timestamp out of a line without decoding it as
 // JSON, so that a rule evaluation's timestamp -- which Read now needs for
 // Span -- costs exactly what a real read's already cost, not a second
-// JSON-decode pass over the whole file. It returns ok=false for a line that
-// does not start with the expected prefix, which simply does not contribute
-// to the file's first/last bound.
+// JSON-decode pass over the whole file. It returns ok=false for a line whose
+// own time field is missing or truncated, which readFile treats as an error:
+// a rule-shaped line never reaches json.Unmarshal (see readMarker), so this
+// is the one check that runs over every line regardless of kind, and it is
+// what stops a corrupted or truncated line from being silently absorbed as
+// an unremarkable entry that also happens to feed Span's bounds.
 func extractTime(line []byte) (string, bool) {
 	if !bytes.HasPrefix(line, []byte(timeFieldPrefix)) {
 		return "", false
@@ -138,28 +141,16 @@ func Read(glob string) (*Reading, error) {
 	entries := 0
 
 	for _, p := range paths {
-		n, firstRaw, lastRaw, err := readFile(p, seen)
+		n, fileEarliest, fileLatest, err := readFile(p, seen)
 		if err != nil {
 			return nil, err
 		}
 		entries += n
-		if firstRaw != "" {
-			t, terr := parseTime(firstRaw)
-			if terr != nil {
-				return nil, fmt.Errorf("%s: %w", p, terr)
-			}
-			if earliest.IsZero() || t.Before(earliest) {
-				earliest = t
-			}
+		if !fileEarliest.IsZero() && (earliest.IsZero() || fileEarliest.Before(earliest)) {
+			earliest = fileEarliest
 		}
-		if lastRaw != "" {
-			t, terr := parseTime(lastRaw)
-			if terr != nil {
-				return nil, fmt.Errorf("%s: %w", p, terr)
-			}
-			if t.After(latest) {
-				latest = t
-			}
+		if !fileLatest.IsZero() && fileLatest.After(latest) {
+			latest = fileLatest
 		}
 	}
 
@@ -176,10 +167,10 @@ func Read(glob string) (*Reading, error) {
 	return r, nil
 }
 
-func readFile(path string, seen map[string]bool) (entries int, firstRaw, lastRaw string, err error) {
+func readFile(path string, seen map[string]bool) (entries int, earliest, latest time.Time, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, "", "", fmt.Errorf("open %s: %w", path, err)
+		return 0, earliest, latest, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 
@@ -187,7 +178,7 @@ func readFile(path string, seen map[string]bool) (entries int, firstRaw, lastRaw
 	if strings.HasSuffix(path, ".gz") {
 		zr, zerr := gzip.NewReader(f)
 		if zerr != nil {
-			return 0, "", "", fmt.Errorf("open %s: %w", path, zerr)
+			return 0, earliest, latest, fmt.Errorf("open %s: %w", path, zerr)
 		}
 		defer zr.Close()
 		src = zr
@@ -198,30 +189,50 @@ func readFile(path string, seen map[string]bool) (entries int, firstRaw, lastRaw
 	// be long; the default 64 KiB token limit is not enough.
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
+	lineNum := 0
 	for sc.Scan() {
+		lineNum++
 		line := sc.Bytes()
 		if len(line) == 0 {
 			continue
 		}
 		entries++
-		// Every entry, rule evaluation or real read, marks the log as alive
-		// at this instant. Log lines are chronological, so the first one
-		// seen is the file's earliest bound and the last one seen -- kept
-		// overwriting, unconditionally -- is its latest. Only two of these
-		// raw strings are ever parsed into a time.Time (in Read, once per
-		// file), not one parse per line.
-		if ts, ok := extractTime(line); ok {
-			if firstRaw == "" {
-				firstRaw = ts
-			}
-			lastRaw = ts
+
+		// Every non-empty line, rule evaluation or real read, must carry a
+		// parseable timestamp. This is the one check that runs over every
+		// line regardless of kind -- a rule-shaped line never reaches
+		// json.Unmarshal below -- so it is what stops a truncated or
+		// corrupted line from being silently counted as an unremarkable
+		// entry. A log that cannot be fully read is an error, never an
+		// entry quietly dropped.
+		raw, ok := extractTime(line)
+		if !ok {
+			return entries, earliest, latest, fmt.Errorf("%s: line %d: no parseable time field", path, lineNum)
 		}
+		t, terr := parseTime(raw)
+		if terr != nil {
+			return entries, earliest, latest, fmt.Errorf("%s: line %d: %w", path, lineNum, terr)
+		}
+		// The bound is a running min/max over every entry's actual parsed
+		// time, not the physically first and last line. Nothing here should
+		// have to trust that a log file is chronological -- a rotation
+		// artifact, a clock correction, or a manual splice could put an
+		// out-of-order line anywhere -- and an inflated span is the
+		// dangerous direction: it can push a log past the trust threshold
+		// and license a drop it should not.
+		if earliest.IsZero() || t.Before(earliest) {
+			earliest = t
+		}
+		if t.After(latest) {
+			latest = t
+		}
+
 		if !strings.Contains(string(line), readMarker) {
 			continue
 		}
 		var e logLine
 		if err := json.Unmarshal(line, &e); err != nil {
-			return entries, firstRaw, lastRaw, fmt.Errorf("%s: malformed query log line: %w", path, err)
+			return entries, earliest, latest, fmt.Errorf("%s: line %d: malformed query log line: %w", path, lineNum, err)
 		}
 		if e.HTTPRequest == nil {
 			continue
@@ -231,7 +242,7 @@ func readFile(path string, seen map[string]bool) (entries int, firstRaw, lastRaw
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return entries, firstRaw, lastRaw, fmt.Errorf("read %s: %w", path, err)
+		return entries, earliest, latest, fmt.Errorf("read %s: %w", path, err)
 	}
-	return entries, firstRaw, lastRaw, nil
+	return entries, earliest, latest, nil
 }
