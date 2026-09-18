@@ -262,6 +262,84 @@ func TestARecordingRuleOutputIsNeverProposedForAggregation(t *testing.T) {
 // forever in a package it does not own -- so a MetricNeed whose one
 // operator is not sum, min or max must refuse even when AllOpsSafe claims
 // otherwise.
+// The counter-reset defect this task exists for: summing a counter and
+// rating the sum is not the same as summing the rates, so what gets
+// recorded and named must be the rate, not the metric.
+func TestARateConsumerProposesTheRateNotTheCounter(t *testing.T) {
+	c := corpus.Corpus{
+		Used: map[string]bool{"m_total": true},
+		Needs: map[string]corpus.MetricNeed{
+			"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true,
+				Fns: []string{"rate"}, Windows: []string{"5m"}},
+		},
+	}
+	props, refs := Decide(inv("m_total", 400), c, nil)
+	if len(props) != 1 {
+		t.Fatalf("got %d proposals and %d refusals, want 1 proposal: %v", len(props), len(refs), refs)
+	}
+	p := props[0]
+	if p.Fn != "rate" {
+		t.Errorf("Fn = %q, want rate", p.Fn)
+	}
+	if p.Window != "5m" {
+		t.Errorf("Window = %q, want 5m", p.Window)
+	}
+	if p.RuleName != "path:m_total:sum_rate5m" {
+		t.Errorf("RuleName = %q, want path:m_total:sum_rate5m", p.RuleName)
+	}
+}
+
+// Whichever function a recording rule picked, at least one consumer's
+// answer would change -- irate and rate are not interchangeable.
+func TestDisagreeingRangeFunctionsAreRefused(t *testing.T) {
+	c := corpus.Corpus{
+		Used: map[string]bool{"m_total": true},
+		Needs: map[string]corpus.MetricNeed{
+			"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true,
+				Fns: []string{"irate", "rate"}},
+		},
+	}
+	_, refs := Decide(inv("m_total", 400), c, nil)
+	if len(refs) != 1 || !strings.Contains(refs[0].Reason, "function") {
+		t.Fatalf("refusals = %v, want one naming the function disagreement", refs)
+	}
+}
+
+// Same function, different windows: exactly as unrewritable as different
+// functions, because whichever window the rule picks, one consumer's rate
+// changes underneath it.
+func TestDisagreeingWindowsAreRefused(t *testing.T) {
+	c := corpus.Corpus{
+		Used: map[string]bool{"m_total": true},
+		Needs: map[string]corpus.MetricNeed{
+			"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true,
+				Fns: []string{"rate"}, Windows: []string{"10m", "5m"}},
+		},
+	}
+	_, refs := Decide(inv("m_total", 400), c, nil)
+	if len(refs) != 1 || !strings.Contains(refs[0].Reason, "window") {
+		t.Fatalf("refusals = %v, want one naming the window disagreement", refs)
+	}
+}
+
+// A consumer reading the counter directly and one rating it are answering
+// different questions -- sum(m) is not sum(rate(m[5m])) -- so this must
+// refuse exactly like two disagreeing functions do, and the empty string
+// must read as "the metric itself" rather than an unlabelled blank.
+func TestInstantAndRateMixIsRefused(t *testing.T) {
+	c := corpus.Corpus{
+		Used: map[string]bool{"m_total": true},
+		Needs: map[string]corpus.MetricNeed{
+			"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true,
+				Fns: []string{"", "rate"}},
+		},
+	}
+	_, refs := Decide(inv("m_total", 400), c, nil)
+	if len(refs) != 1 || !strings.Contains(refs[0].Reason, "the metric itself") {
+		t.Fatalf("refusals = %v, want one naming the mix, with the empty string rendered as \"the metric itself\"", refs)
+	}
+}
+
 func TestAnOperatorOutsideTheKnownSetIsRefused(t *testing.T) {
 	c := corpus.Corpus{
 		Used:  map[string]bool{"m_total": true},

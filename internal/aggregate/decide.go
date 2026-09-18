@@ -24,6 +24,8 @@ type Proposal struct {
 	Metric    string
 	Keep      []string // labels that survive, sorted
 	Op        string   // "sum", "min" or "max"
+	Fn        string   // "rate", "irate", "increase", or "" for the metric itself
+	Window    string   // the range, e.g. "5m"; empty when Fn is
 	RawSeries int
 	// KeptSeries is left at its zero value here: this package has no label
 	// list to run a `count by (...)` query against, only a name and a
@@ -99,6 +101,15 @@ func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[str
 		sort.Strings(keep)
 		op := need.Ops[0]
 
+		// fn/win default to the metric-itself case. need.Fns is normalized
+		// to that same case when empty -- see the comment in refuse -- so
+		// this mirrors that check rather than re-deciding it.
+		var fn, win string
+		if len(need.Fns) == 1 && need.Fns[0] != "" {
+			fn = need.Fns[0]
+			win = need.Windows[0]
+		}
+
 		// keep can be empty here: All is false and Required is nil means the
 		// one consumer that touches this metric aggregates it down to a
 		// single series and needs no label at all -- collapsing 400 series
@@ -106,12 +117,21 @@ func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[str
 		// RuleName's leading colon (":m_total:sum") is the conventional
 		// rendering of an empty level in level:metric:operations, so the
 		// name stays idiomatic even at zero labels.
+		ruleName := strings.Join(keep, "_") + ":" + m.Name + ":" + op
+		if fn != "" {
+			// sum_rate5m, not sum_rate_5m: the function and its window read
+			// as one token, the same way Prometheus's own rules do it.
+			ruleName += "_" + fn + win
+		}
+
 		proposals = append(proposals, Proposal{
 			Metric:    m.Name,
 			Keep:      keep,
 			Op:        op,
+			Fn:        fn,
+			Window:    win,
 			RawSeries: m.Series,
-			RuleName:  strings.Join(keep, "_") + ":" + m.Name + ":" + op,
+			RuleName:  ruleName,
 		})
 	}
 
@@ -201,5 +221,35 @@ func refuse(metric string, need corpus.MetricNeed, c corpus.Corpus, dashboardCon
 	if op := need.Ops[0]; op != "sum" && op != "min" && op != "max" {
 		return fmt.Sprintf("%s is not sum, min or max, the only operators this package knows how to record", op), true
 	}
+	// Fns is empty for a MetricNeed built directly by a test written before
+	// Fn existed (this package's own tests among them) -- and, per
+	// corpus.foldNeeds' own invariant, is never empty for a metric a real
+	// corpus.Build actually has a Needs entry for. Both cases mean the same
+	// thing here: no function was ever claimed, so there is nothing to
+	// disagree about. Only an actual pair of DIFFERENT claims -- rate and
+	// irate, or the metric itself and rate -- reaches the len(need.Fns) > 1
+	// branch below.
+	if len(need.Fns) > 1 {
+		return fmt.Sprintf("consumers disagree on the range function: %s", strings.Join(renderFns(need.Fns), ", ")), true
+	}
+	if len(need.Fns) == 1 && need.Fns[0] != "" && len(need.Windows) != 1 {
+		return fmt.Sprintf("consumers disagree on the range window: %s", strings.Join(need.Windows, ", ")), true
+	}
 	return "", false
+}
+
+// renderFns renders Fns for a human reading a refusal reason: the empty
+// string is a real member of the set (see corpus.MetricNeed.Fns), and
+// printing it unlabelled would read as a blank rather than as "one consumer
+// reads the metric itself."
+func renderFns(fns []string) []string {
+	out := make([]string, len(fns))
+	for i, fn := range fns {
+		if fn == "" {
+			out[i] = "the metric itself"
+		} else {
+			out[i] = fn
+		}
+	}
+	return out
 }
