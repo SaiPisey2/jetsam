@@ -13,6 +13,17 @@ import (
 // rewriteParser is RewriteConsumer's own parser instance, kept as one shared
 // value the same way ruleParser is in record.go -- nothing here is per-call
 // either.
+//
+// The zero-value Options{} is load-bearing, not merely the default: every
+// experimental flag off is what makes `anchored`, `smoothed`, and a
+// duration-expression window fail to parse at all -- see
+// hasOffsetOrAt's own comment for why an unenumerated parser-set field
+// defaulting to "no modifier" is exactly this package's Critical defect
+// from its own history. Enabling any of EnableExtendedRangeSelectors or
+// ExperimentalDurationExpr here would make matchAggregate blind to those
+// modifiers the same way it was once blind to offset -- see
+// TestRewriteParserRejectsExperimentalModifiers, which exists to fail
+// loudly the day that stops being true.
 var rewriteParser = parser.NewParser(parser.Options{})
 
 // span is a byte range in the original query, carried as plain ints rather

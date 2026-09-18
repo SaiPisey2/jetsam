@@ -381,3 +381,58 @@ func TestRewriteConsumerRejectsABadOp(t *testing.T) {
 		t.Fatal("RewriteConsumer accepted an Op outside sum/min/max, want an error")
 	}
 }
+
+// TestRewriteParserRejectsExperimentalModifiers pins what rewriteParser's
+// zero-value Options{} buys this package: `anchored`, `smoothed`, and a
+// duration-expression window are three more parser-set VectorSelector /
+// MatrixSelector fields -- Anchored, Smoothed, and RangeExpr -- that
+// hasOffsetOrAt does not check, exactly the shape of the offset defect
+// this package already shipped once. They are safe today only because
+// they fail to parse at all under the default Options, so matchAggregate
+// never sees a selector carrying one. If rewriteParser is ever built with
+// EnableExtendedRangeSelectors or ExperimentalDurationExpr, or a future
+// Prometheus stabilises either without a flag, this test starts failing
+// where the silent version of the bug would otherwise start -- matching
+// TestExperimentalAggregatorsDoNotParse in
+// internal/corpus/labels_test.go, which pins the same kind of gate for a
+// different experimental feature.
+func TestRewriteParserRejectsExperimentalModifiers(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"anchored", "rate(m_total[5m] anchored)"},
+		{"smoothed", "rate(m_total[5m] smoothed)"},
+		{"duration-expression window", "rate(m_total[(5+0)m])"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := rewriteParser.ParseExpr(c.query); err == nil {
+				t.Fatalf("%q parsed; if this Prometheus enabled the feature, hasOffsetOrAt/MatrixSelector matching must account for it", c.query)
+			}
+		})
+	}
+}
+
+// TestRewriteConsumerReportsBothARewriteAndADecline covers the one shape
+// where a caller receives a successful rewrite AND a decline together: two
+// aggregates of the same metric in one query, one matching the proposal
+// and one that does not. A caller treating declined != "" as "nothing
+// happened" would show the original query while jetsam actually rewrote
+// part of it, so both return values must be pinned together rather than
+// left to follow from RewriteConsumer's doc comment alone.
+func TestRewriteConsumerReportsBothARewriteAndADecline(t *testing.T) {
+	p := fixtureProposal()
+	const query = "sum by (path) (rate(m_total[5m])) + min by (path) (rate(m_total[5m]))"
+	got, declined, err := RewriteConsumer(query, p)
+	if err != nil {
+		t.Fatalf("RewriteConsumer: %v", err)
+	}
+	const want = "path:m_total:sum_rate5m + min by (path) (rate(m_total[5m]))"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if declined == "" {
+		t.Fatal("declined is empty, want a reason for the min aggregate that was left alone")
+	}
+}
