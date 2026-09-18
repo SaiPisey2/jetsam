@@ -16,6 +16,13 @@ services:
       # prometheus.yml -- this Prometheus version has no CLI flag for it.
       # The directory is bind-mounted because jetsam runs on the host, not
       # in a container, and sub-project B needs to read the file from there.
+      # --web.enable-lifecycle turns on POST /-/reload, which is off by
+      # default. fixture/aggregate_test.go's equivalence check needs it: it
+      # writes a rendered recording rule into a file this stack already
+      # globs, reloads to make Prometheus actually evaluate it, and reloads
+      # again after removing the file -- there is no other way to get a
+      # rule in front of a running Prometheus without restarting it.
+      - --web.enable-lifecycle
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/rules:/etc/prometheus/rules:ro

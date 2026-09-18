@@ -1,0 +1,19 @@
+# Hand-written, not vendored -- see fixture/VENDOR.md's "Local rules"
+# section for why this file exists at all and why it is not fetched by
+# fixture/vendor.sh like everything else in this directory.
+#
+# jetsam_demo_requests_total is read only by the loadgen dashboard, so the
+# rewritability rule refuses it outright -- see fixture/aggregate_test.go.
+# This gives it a second consumer, one jetsam IS allowed to rewrite. It is
+# deliberately an ALERTING rule, not the recording rule the aggregate case
+# would otherwise propose verbatim: an alerting rule forces the rewriter to
+# replace only the aggregate subtree it recognises and leave the surrounding
+# "> 100" standing, which a recording-rule-only fixture would never exercise.
+groups:
+  - name: loadgen
+    rules:
+      - alert: LoadgenPathErrors
+        expr: sum by (path) (rate(jetsam_demo_requests_total[5m])) > 100
+        for: 10m
+        labels:
+          severity: warning

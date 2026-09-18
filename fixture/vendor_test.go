@@ -27,6 +27,22 @@ const (
 	// PromQL with no template substitution at all. See
 	// TestVendoredDashboardCarriesTheTemplateVariableHazard.
 	wantParsingQueries = 160
+
+	// wantLocalGroups, wantLocalRules and wantLocalAlerting count
+	// fixture/prometheus/rules/local.yaml -- the second hand-made rule
+	// file in this fixture (the first is loadgen itself; see
+	// fixture/VENDOR.md's "Local rules" section). It carries no entry in
+	// vendoredRuleFiles below and TestVendoredRulesParseAndMatchVendorDoc
+	// never reads it, because nothing vendored it -- but it lives in the
+	// same directory the *.yaml glob in prometheus.yml's rule_files loads,
+	// so it is real content the running Prometheus serves at
+	// /api/v1/rules. fixture/stack_test.go's TestStackLoadsEveryVendoredRule
+	// adds these to the vendored totals above rather than folding them
+	// into wantGroups/wantRules/wantAlerting themselves, because those
+	// three names mean "vendored" and this file is not.
+	wantLocalGroups   = 1
+	wantLocalRules    = 1
+	wantLocalAlerting = 1
 )
 
 // vendoredRuleFiles is what VENDOR.md records for each vendored rule file.

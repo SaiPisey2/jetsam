@@ -58,9 +58,16 @@ func TestStackLoadsEveryVendoredRule(t *testing.T) {
 			}
 		}
 	}
-	if len(body.Data.Groups) != wantGroups || rules != wantRules || recording != wantRecording {
+	// +wantLocalGroups/+wantLocalRules: fixture/prometheus/rules/local.yaml
+	// loads through the same glob as every vendored file, so what
+	// Prometheus actually serves here is the vendored total plus that one
+	// hand-made group and rule. recording is untouched by it -- local.yaml
+	// is alerting only. See fixture/VENDOR.md's "Local rules" section.
+	wantTotalGroups := wantGroups + wantLocalGroups
+	wantTotalRules := wantRules + wantLocalRules
+	if len(body.Data.Groups) != wantTotalGroups || rules != wantTotalRules || recording != wantRecording {
 		t.Errorf("prometheus loaded %d groups / %d rules / %d recording, want %d / %d / %d (see fixture/VENDOR.md)",
-			len(body.Data.Groups), rules, recording, wantGroups, wantRules, wantRecording)
+			len(body.Data.Groups), rules, recording, wantTotalGroups, wantTotalRules, wantRecording)
 	}
 }
 

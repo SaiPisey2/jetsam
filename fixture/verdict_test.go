@@ -155,7 +155,14 @@ func TestKnownArchetypesGradeCorrectly(t *testing.T) {
 		{
 			metric: "jetsam_demo_requests_total",
 			want:   verdict.GradeUsed,
-			why:    "a dashboard reads it -- the corpus is no longer rules only",
+			// Two independent reasons as of Task 7, either one alone
+			// sufficient: the loadgen dashboard, unchanged since v0.1, and
+			// now also fixture/prometheus/rules/local.yaml's
+			// LoadgenPathErrors alerting rule -- which is precisely why
+			// this metric no longer serves as a dashboardCanary below: with
+			// a real rule reading it too, "rules alone" can no longer
+			// leave it unreferenced.
+			why: "a dashboard reads it, and so does the local LoadgenPathErrors rule -- the corpus is no longer rules only",
 		},
 		// This case exists to exercise verdict.Compute's Produced branch --
 		// the rule that stops jetsam proposing a drop for a metric one of
@@ -192,11 +199,19 @@ func TestKnownArchetypesGradeCorrectly(t *testing.T) {
 	}
 }
 
-// dashboardCanaries are the two metrics pinned unreferenced in v0.1
+// dashboardCanaries are the metrics pinned unreferenced in v0.1
 // specifically because only a dashboard reads them. Both tests below
 // share the list so the flip and its before-state are checked against
 // exactly the same metrics.
-var dashboardCanaries = []string{"jetsam_demo_requests_total", "node_scrape_collector_duration_seconds"}
+//
+// jetsam_demo_requests_total was the second entry here through v0.1's own
+// dashboard-arrival work, but Task 7 gave it a real rule consumer
+// (fixture/prometheus/rules/local.yaml's LoadgenPathErrors) specifically so
+// aggregate has something to rewrite -- so "rules alone" no longer leaves
+// it unreferenced, and it can no longer serve this list's purpose. See its
+// own case in TestKnownArchetypesGradeCorrectly for where its dashboard
+// read is still checked.
+var dashboardCanaries = []string{"node_scrape_collector_duration_seconds"}
 
 // TestDashboardsAloneFlipTheDashboardCanaries isolates the dashboard
 // evidence source from the query log. Grafana's own auto-refresh sends
@@ -331,8 +346,11 @@ func TestTheCorpusBlocksNothing(t *testing.T) {
 	if len(c.Blocked) != 0 {
 		t.Errorf("corpus blocked %d queries, want 0: %v", len(c.Blocked), c.Blocked)
 	}
-	if c.Queries != wantRules {
-		t.Errorf("corpus read %d queries, want %d (see fixture/VENDOR.md)", c.Queries, wantRules)
+	// +wantLocalRules: fixture/prometheus/rules/local.yaml loads through the
+	// same glob as every vendored file (see fixture/VENDOR.md's "Local
+	// rules" section), so AlertingAndRecordingRules returns it too.
+	if want := wantRules + wantLocalRules; c.Queries != want {
+		t.Errorf("corpus read %d queries, want %d (see fixture/VENDOR.md)", c.Queries, want)
 	}
 }
 
@@ -367,12 +385,15 @@ func withholdingBaseline(t *testing.T) (inventory.Inventory, corpus.Sources, []s
 	return inv, src, names
 }
 
-// unqueriedCanary is read by no vendored rule (see
-// TestRulesAloneLeaveTheDashboardCanariesUnreferenced's sibling metrics)
-// and is deliberately absent from withholdingBaseline's restricted query
-// log, so it is the metric whose droppability the two tests below can
-// watch move.
-const unqueriedCanary = "jetsam_demo_requests_total"
+// unqueriedCanary is read by no rule at all -- vendored or, since Task 7,
+// local (see dashboardCanaries' own comment on why jetsam_demo_requests_total
+// no longer qualifies: fixture/prometheus/rules/local.yaml's
+// LoadgenPathErrors now reads it, so withholdingBaseline's Rules-included
+// corpus would grade it Used, not Unqueried, and this baseline's own
+// self-check below would catch that immediately) -- and is deliberately
+// absent from withholdingBaseline's restricted query log, so it is the
+// metric whose droppability the two tests below can watch move.
+const unqueriedCanary = "node_scrape_collector_duration_seconds"
 
 // A log shorter than the configured minimum must not license a drop, however
 // complete it looks.

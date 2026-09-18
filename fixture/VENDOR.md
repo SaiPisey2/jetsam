@@ -12,6 +12,12 @@ is hand-edited. These artifacts decide what the stack counts as a "used"
 metric, and they were written by people with no knowledge of this project
 — which is the only reason they are worth testing against.
 
+Two artifacts are the deliberate exception, and both are hand-made rather
+than vendored: `fixture/loadgen` (see its own doc comment for why an
+exporter with a known, exact cardinality has to be written on purpose) and
+`fixture/prometheus/rules/local.yaml` (see "Local rules" below). Neither is
+touched by `fixture/vendor.sh` or the bump procedure this file describes.
+
 Bumping a pin: edit the version in `fixture/vendor.sh`, re-run it, then run
 `go test ./fixture/ -run TestVendored`. It will fail, telling you exactly
 which counts moved.
@@ -48,6 +54,39 @@ like `node` or `prometheus` does not fail anything loudly -- the rules
 still load and still evaluate `health: ok` -- it just makes all 15
 recording rules produce zero series and all 49 alerting rules permanently
 inactive, which is a fixture that measures nothing.
+
+## Local rules
+
+`fixture/prometheus/rules/local.yaml` — the second hand-made fixture
+artifact, alongside `loadgen` above. Every other rule file in this
+directory is vendored from upstream (see "Prometheus rules" above); this
+one is written by this project, deliberately, because none of the vendored
+rules read `jetsam_demo_requests_total`, and the sub-project that proposes
+collapsing a metric's labels needs a real consumer it is allowed to
+rewrite to prove the whole chain against, not just a refusal.
+
+| Property | Value |
+| --- | --- |
+| Groups | 1 |
+| Rules | 1 |
+| Recording | 0 |
+| Alerting | 1 |
+
+It is loaded by the same `/etc/prometheus/rules/*.yaml` glob as every
+vendored file (`fixture/prometheus/prometheus.yml`'s `rule_files`), so it
+is real content the running Prometheus serves at `/api/v1/rules` — pinned
+separately as `wantLocalGroups`/`wantLocalRules`/`wantLocalAlerting` in
+`fixture/vendor_test.go`, added to the vendored totals wherever
+`fixture/stack_test.go` checks what the live stack actually loaded, rather
+than folded into `wantGroups`/`wantRules`/`wantAlerting` themselves: those
+three names mean "vendored", and this file is not.
+
+It is an ALERTING rule, `sum by (path) (rate(jetsam_demo_requests_total[5m])) > 100`,
+not the recording rule the plan originally specified. Recording it verbatim
+would ask jetsam to name a rule computing exactly what it already computes
+— correct, and pointless as a demonstration. As an alerting rule it forces
+the rewriter to replace only the aggregate subtree it recognises and leave
+the surrounding `> 100` standing; see `fixture/aggregate_test.go`.
 
 ## Grafana dashboard
 
