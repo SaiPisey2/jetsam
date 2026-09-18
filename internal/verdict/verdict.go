@@ -60,13 +60,20 @@ type Result struct {
 
 // Compute grades every metric in the inventory.
 //
-// haveQueryLog is the difference between "no rule mentions it" and "nobody
-// read it". Only the second licenses a drop, which is why an install with
-// no query log configured proposes nothing at all by default -- the honest
-// outcome, not a broken one.
-func Compute(inv inventory.Inventory, c corpus.Corpus, haveQueryLog bool) Result {
+// The corpus itself carries the difference between "no rule mentions it"
+// and "nobody read it": LogRead and LogQualifies together are what used to
+// be a caller-supplied haveQueryLog bool. Only a log that was both read and
+// long enough licenses a drop, which is why an install with no qualifying
+// log proposes nothing at all by default -- the honest outcome, not a
+// broken one.
+func Compute(inv inventory.Inventory, c corpus.Corpus) Result {
 	res := Result{Blocked: c.Blocked}
-	blocked := len(c.Blocked) > 0
+	// Dashboard evidence configured but unavailable withholds everything.
+	// "No dashboard reads it" and "nobody looked" produce identical numbers
+	// and opposite meanings.
+	dashboardsMissing := c.DashboardsConfigured && !c.DashboardsReachable
+	blocked := len(c.Blocked) > 0 || dashboardsMissing
+	haveQueryLog := c.LogRead && c.LogQualifies
 
 	for _, m := range inv.Metrics {
 		v := Verdict{Metric: m.Name, Series: m.Series}
@@ -87,7 +94,11 @@ func Compute(inv inventory.Inventory, c corpus.Corpus, haveQueryLog bool) Result
 		}
 		if blocked && v.Droppable {
 			v.Droppable = false
-			v.Reason = "blocked: a query could not be read"
+			if dashboardsMissing {
+				v.Reason = "blocked: dashboard evidence was configured but could not be fetched"
+			} else {
+				v.Reason = "blocked: a query could not be read"
+			}
 		}
 		if v.Droppable {
 			res.DroppableSeries = addSeriesSaturating(res.DroppableSeries, m.Series)

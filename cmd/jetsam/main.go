@@ -164,14 +164,14 @@ func runScan(args []string) {
 	for _, m := range inv.Metrics {
 		names = append(names, m.Name)
 	}
-	cor := corpus.Build(rules, names)
+	cor := corpus.Build(corpus.Sources{Rules: rules}, names)
 	// v0.1 never reads a query log, so the evidence for "nobody queried
 	// this" does not exist yet; cfg.HaveQueryLog() only reports that a
 	// path is configured in YAML, not that anything was read from it.
-	// Wiring the configured path to Compute here would let one line of
-	// YAML mark metrics droppable on rule evidence alone. This parameter
+	// Wiring the configured path into Sources here would let one line of
+	// YAML mark metrics droppable on rule evidence alone. This wiring
 	// becomes real in v0.3 when log ingestion lands.
-	report.Scan(os.Stdout, inv, cor, verdict.Compute(inv, cor, false))
+	report.Scan(os.Stdout, inv, cor, verdict.Compute(inv, cor))
 }
 
 // runPropose is the production entry point for `jetsam propose`. It wires
@@ -276,13 +276,13 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	for _, m := range inv.Metrics {
 		names = append(names, m.Name)
 	}
-	cor := corpus.Build(rules, names)
+	cor := corpus.Build(corpus.Sources{Rules: rules}, names)
 	// Same reasoning as runScan, and just as deliberate here: v0.1 has no
 	// query log evidence, so passing cfg.HaveQueryLog() would let a line of
 	// YAML mark metrics droppable on rule evidence alone. On a default
 	// install this means propose finds nothing droppable and says so below,
 	// rather than silently deleting data on rule evidence.
-	res := verdict.Compute(inv, cor, false)
+	res := verdict.Compute(inv, cor)
 	blocked := len(res.Blocked) > 0
 
 	var eligible []verdict.Verdict

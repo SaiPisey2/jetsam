@@ -3,8 +3,11 @@ package corpus
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/SaiPisey2/jetsam/internal/grafana"
 	"github.com/SaiPisey2/jetsam/internal/promapi"
+	"github.com/SaiPisey2/jetsam/internal/querylog"
 )
 
 func testRules() []promapi.Rule {
@@ -18,7 +21,7 @@ func testRules() []promapi.Rule {
 
 func TestBuildMarksEveryRuleInputUsed(t *testing.T) {
 	all := []string{"http_requests_total", "http_request_duration_seconds_bucket", "go_goroutines"}
-	c := Build(testRules(), all)
+	c := Build(Sources{Rules: testRules()}, all)
 
 	for _, want := range []string{"http_requests_total", "http_request_duration_seconds_bucket"} {
 		if !c.Used[want] {
@@ -37,7 +40,7 @@ func TestBuildRecordsWhatRecordingRulesProduce(t *testing.T) {
 	// A recording rule's OUTPUT is a real series in the inventory. v0.1
 	// never proposes dropping one, because doing so means editing a rule
 	// file rather than a scrape config.
-	c := Build(testRules(), []string{"http_requests_total"})
+	c := Build(Sources{Rules: testRules()}, []string{"http_requests_total"})
 	if !c.Produced["job:latency:p99"] {
 		t.Error("Produced[job:latency:p99] = false, want true")
 	}
@@ -48,7 +51,7 @@ func TestBuildRecordsWhatRecordingRulesProduce(t *testing.T) {
 
 func TestBuildBlocksOnAnUnparseableQuery(t *testing.T) {
 	rules := []promapi.Rule{{Group: "g", Name: "Broken", Type: "alerting", Query: `rate(x[$interval])`}}
-	c := Build(rules, []string{"x", "y"})
+	c := Build(Sources{Rules: rules}, []string{"x", "y"})
 	if len(c.Blocked) != 1 {
 		t.Fatalf("Blocked = %v, want one entry naming the unreadable rule", c.Blocked)
 	}
@@ -73,7 +76,7 @@ func TestBuildProtectsABlockedRecordingRulesOutput(t *testing.T) {
 		{Group: "g", Name: "Good", Type: "alerting", Query: `up == 0`},
 		{Group: "g", Name: "Broken", Type: "recording", Query: `rate(x[$interval])`},
 	}
-	c := Build(rules, []string{"up", "x", "unrelated"})
+	c := Build(Sources{Rules: rules}, []string{"up", "x", "unrelated"})
 
 	if !c.Used["up"] {
 		t.Error("up: Used = false, want true — the clean rule was processed normally")
@@ -92,5 +95,88 @@ func TestBuildProtectsABlockedRecordingRulesOutput(t *testing.T) {
 	}
 	if !strings.Contains(c.Blocked[0], "g") || !strings.Contains(c.Blocked[0], "Broken") {
 		t.Errorf("Blocked[0] = %q, want it to name both the group %q and the rule %q", c.Blocked[0], "g", "Broken")
+	}
+}
+
+// A metric only a dashboard reads is used. This is the case v0.1 could not
+// see, and the whole reason this sub-project exists.
+func TestDashboardsExtendUsed(t *testing.T) {
+	c := Build(Sources{
+		Rules: nil,
+		Dashboards: []grafana.Dashboard{{
+			UID: "d", Title: "D",
+			Queries: []string{`sum by (path) (rate(dashboard_only_metric[$__rate_interval]))`},
+		}},
+	}, []string{"dashboard_only_metric", "nothing_reads_this"})
+
+	if !c.Used["dashboard_only_metric"] {
+		t.Error("a metric a dashboard reads is not marked used")
+	}
+	if c.Used["nothing_reads_this"] {
+		t.Error("a metric nothing reads was marked used")
+	}
+}
+
+// An unparseable RULE is fatal. Rules are Prometheus' own configuration, and
+// one jetsam cannot read means it is misreading something fundamental.
+func TestAnUnparseableRuleIsFatal(t *testing.T) {
+	c := Build(Sources{
+		Rules: []promapi.Rule{{Name: "bad", Group: "g", Type: "alerting", Query: "this is not promql {{{"}},
+	}, nil)
+	if len(c.Blocked) == 0 {
+		t.Error("an unparseable rule did not block")
+	}
+}
+
+// An unparseable DASHBOARD PANEL is contained, not fatal: it must not block
+// every drop, because one bad panel in a large Grafana install would make the
+// whole remediation half unreachable. Its metric-name-shaped tokens are
+// conservatively marked used instead.
+func TestAnUnparseableDashboardPanelIsContained(t *testing.T) {
+	c := Build(Sources{
+		Dashboards: []grafana.Dashboard{{
+			UID: "d", Title: "D",
+			Queries: []string{`!!! not promql at all but mentions suspicious_metric here`},
+		}},
+	}, []string{"suspicious_metric", "unrelated_metric"})
+
+	if len(c.Blocked) != 0 {
+		t.Errorf("an unparseable dashboard panel blocked everything: %v", c.Blocked)
+	}
+	if len(c.DashboardPanelsUnparsed) != 1 {
+		t.Errorf("DashboardPanelsUnparsed = %v, want the panel named", c.DashboardPanelsUnparsed)
+	}
+	if !c.Used["suspicious_metric"] {
+		t.Error("a metric named in an unparseable panel was not conservatively marked used")
+	}
+	if c.Used["unrelated_metric"] {
+		t.Error("containment was too broad -- a metric the panel never mentions was marked used")
+	}
+}
+
+func TestQueryLogReadsExtendUsed(t *testing.T) {
+	c := Build(Sources{
+		QueryLog:     &querylog.Reading{Queries: []string{"adhoc_metric"}, Span: 40 * 24 * time.Hour},
+		LogQualifies: true,
+	}, []string{"adhoc_metric", "never_read"})
+
+	if !c.Used["adhoc_metric"] {
+		t.Error("a metric read in the query log is not marked used")
+	}
+	if !c.LogRead || !c.LogQualifies {
+		t.Errorf("LogRead=%v LogQualifies=%v, want both true", c.LogRead, c.LogQualifies)
+	}
+}
+
+func TestAShortLogDoesNotQualify(t *testing.T) {
+	c := Build(Sources{
+		QueryLog:     &querylog.Reading{Queries: nil, Span: time.Hour},
+		LogQualifies: false,
+	}, []string{"m"})
+	if !c.LogRead {
+		t.Error("LogRead should be true -- a log WAS read")
+	}
+	if c.LogQualifies {
+		t.Error("a one-hour log must not qualify")
 	}
 }

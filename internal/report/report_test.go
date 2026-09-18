@@ -13,7 +13,7 @@ import (
 func TestScanStatesWhyNothingIsProposed(t *testing.T) {
 	inv := inventory.Build(promapi.Status{Counts: map[string]int{"unread": 400}, HeadSeries: 400})
 	c := corpus.Corpus{Queries: 5, Used: map[string]bool{}, Produced: map[string]bool{}}
-	res := verdict.Compute(inv, c, false)
+	res := verdict.Compute(inv, c)
 
 	var sb strings.Builder
 	Scan(&sb, inv, c, res)
@@ -36,11 +36,15 @@ func TestScanStatesWhyNothingIsProposed(t *testing.T) {
 // nothing until the blocked rule itself is fixed.
 func TestScanBlamesABlockedRuleNotAMissingQueryLog(t *testing.T) {
 	inv := inventory.Build(promapi.Status{Counts: map[string]int{"unread": 400}, HeadSeries: 400})
-	c := corpus.Corpus{Queries: 1, Used: map[string]bool{}, Produced: map[string]bool{}, Blocked: []string{"rule g/Broken: parse error"}}
-	// haveQueryLog=true: even WITH a query log configured, a blocked rule
-	// still forbids every drop, so "no query log" would be doubly wrong
-	// here.
-	res := verdict.Compute(inv, c, true)
+	c := corpus.Corpus{
+		Queries: 1, Used: map[string]bool{}, Produced: map[string]bool{},
+		Blocked: []string{"rule g/Broken: parse error"},
+		// LogRead/LogQualifies true: even WITH a qualifying query log, a
+		// blocked rule still forbids every drop, so "no query log" would be
+		// doubly wrong here.
+		LogRead: true, LogQualifies: true,
+	}
+	res := verdict.Compute(inv, c)
 
 	var sb strings.Builder
 	Scan(&sb, inv, c, res)
@@ -60,8 +64,11 @@ func TestScanBlamesABlockedRuleNotAMissingQueryLog(t *testing.T) {
 // gap, and the message must not claim one exists.
 func TestScanSaysEverythingIsAccountedForWhenNothingIsMissing(t *testing.T) {
 	inv := inventory.Build(promapi.Status{Counts: map[string]int{"used_metric": 400}, HeadSeries: 400})
-	c := corpus.Corpus{Queries: 1, Used: map[string]bool{"used_metric": true}, Produced: map[string]bool{}}
-	res := verdict.Compute(inv, c, true)
+	c := corpus.Corpus{
+		Queries: 1, Used: map[string]bool{"used_metric": true}, Produced: map[string]bool{},
+		LogRead: true, LogQualifies: true,
+	}
+	res := verdict.Compute(inv, c)
 
 	var sb strings.Builder
 	Scan(&sb, inv, c, res)
@@ -85,7 +92,7 @@ func TestScanNeverEmitsARawEscapeByte(t *testing.T) {
 	const hostile = "up\x1b[2K\x1b[1;31mFAKE\x1b[0m"
 	inv := inventory.Build(promapi.Status{Counts: map[string]int{hostile: 400}, HeadSeries: 400})
 	c := corpus.Corpus{Queries: 0, Used: map[string]bool{}, Produced: map[string]bool{}}
-	res := verdict.Compute(inv, c, false)
+	res := verdict.Compute(inv, c)
 
 	var sb strings.Builder
 	Scan(&sb, inv, c, res)
@@ -112,7 +119,7 @@ func TestScanWarnsLoudlyWhenTheInventoryWasTruncated(t *testing.T) {
 		Truncated:  true,
 	})
 	c := corpus.Corpus{Queries: 0, Used: map[string]bool{}, Produced: map[string]bool{}}
-	res := verdict.Compute(inv, c, false)
+	res := verdict.Compute(inv, c)
 
 	var sb strings.Builder
 	Scan(&sb, inv, c, res)
@@ -137,7 +144,7 @@ func TestScanDoesNotWarnWhenNotTruncated(t *testing.T) {
 		Truncated:  false,
 	})
 	c := corpus.Corpus{Queries: 0, Used: map[string]bool{}, Produced: map[string]bool{}}
-	res := verdict.Compute(inv, c, false)
+	res := verdict.Compute(inv, c)
 
 	var sb strings.Builder
 	Scan(&sb, inv, c, res)

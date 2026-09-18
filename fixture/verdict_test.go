@@ -36,7 +36,7 @@ func grade(t *testing.T) map[string]verdict.Grade {
 	for _, m := range inv.Metrics {
 		names = append(names, m.Name)
 	}
-	res := verdict.Compute(inv, corpus.Build(rules, names), false)
+	res := verdict.Compute(inv, corpus.Build(corpus.Sources{Rules: rules}, names))
 
 	out := make(map[string]verdict.Grade, len(res.Verdicts))
 	for _, v := range res.Verdicts {
@@ -127,7 +127,7 @@ func TestRecordingRuleOutputsAreProtected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rules: %v", err)
 	}
-	c := corpus.Build(rules, nil)
+	c := corpus.Build(corpus.Sources{Rules: rules}, nil)
 
 	if len(c.Produced) != wantRecording {
 		t.Errorf("corpus recorded %d produced metrics, want %d (see fixture/VENDOR.md)", len(c.Produced), wantRecording)
@@ -156,7 +156,7 @@ func TestTheCorpusBlocksNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rules: %v", err)
 	}
-	c := corpus.Build(rules, nil)
+	c := corpus.Build(corpus.Sources{Rules: rules}, nil)
 	if len(c.Blocked) != 0 {
 		t.Errorf("corpus blocked %d queries, want 0: %v", len(c.Blocked), c.Blocked)
 	}

@@ -106,8 +106,8 @@ func TestProposeApplyFailsFastWithoutOwnerRepoOrToken(t *testing.T) {
 // forge.NewFakeProvider() wired in through newProvider so nothing ever
 // reaches a real repository.
 //
-// Under the standing rule that runPropose always calls
-// verdict.Compute(inv, cor, false) (v0.1 has no query log evidence), a
+// Under the standing rule that runPropose always calls verdict.Compute
+// with a corpus carrying no query log evidence (v0.1 wires none in), a
 // default scan never finds anything droppable, so this is the only shape
 // of -apply run this binary can produce today: it must still fail-safe by
 // not creating a branch or opening a PR, and it must not print the token

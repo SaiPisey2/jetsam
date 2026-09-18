@@ -41,7 +41,7 @@ func TestAgainstThePublicDemo(t *testing.T) {
 	for _, m := range inv.Metrics {
 		names = append(names, m.Name)
 	}
-	cor := corpus.Build(rules, names)
+	cor := corpus.Build(corpus.Sources{Rules: rules}, names)
 
 	// Real mixin rules must parse. A blocked corpus here means Extract
 	// cannot read production PromQL, which is the whole product.
@@ -52,7 +52,7 @@ func TestAgainstThePublicDemo(t *testing.T) {
 		t.Error("no metric marked used by real mixin rules -- reference extraction is broken")
 	}
 
-	res := verdict.Compute(inv, cor, false)
+	res := verdict.Compute(inv, cor)
 	if res.DroppableSeries != 0 {
 		t.Errorf("DroppableSeries = %d without a query log, want 0", res.DroppableSeries)
 	}
