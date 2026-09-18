@@ -2,6 +2,7 @@ package corpus
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,11 +86,24 @@ func TestLabelsNeeded(t *testing.T) {
 			want:  LabelNeed{Required: []string{"path", "pod"}, Op: "sum", OpSafe: true},
 		},
 		{
-			// The source label is a string argument, not a matcher. An AST
-			// walk that only inspects selectors misses it entirely.
-			name:  "label_replace's source label is required",
+			// label_replace applied directly to the selector is an instant
+			// function sitting immediately above it, exactly like abs(m) --
+			// sum(label_replace(x, ...)) is not guaranteed safe to
+			// pre-aggregate any more than sum(abs(x)) is, so this refuses
+			// rather than record a function-free requirement that ignores
+			// label_replace entirely.
+			name:  "label_replace directly over the selector refuses like any other instant function",
 			query: `sum by (path) (label_replace(jetsam_demo_requests_total, "x", "$1", "pod", "(.*)"))`,
-			want:  LabelNeed{Required: []string{"path", "pod"}, Op: "sum", OpSafe: true},
+			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
+		},
+		{
+			// label_replace nested under rate is unaffected: a
+			// *MatrixSelector sits between the selector and rate's Call, so
+			// the instant-function check above never sees label_replace at
+			// all, and the range function is still recorded normally.
+			name:  "label_replace nested under rate is unaffected",
+			query: `sum by (path) (label_replace(rate(jetsam_demo_requests_total[5m]), "x", "$1", "pod", "(.*)"))`,
+			want:  LabelNeed{Required: []string{"path", "pod"}, Op: "sum", OpSafe: true, Fn: "rate", Window: 5 * time.Minute},
 		},
 		{
 			name:  "a query that does not touch the metric needs nothing from it",
@@ -158,6 +172,17 @@ func TestLabelsNeeded(t *testing.T) {
 			query: `sum(rate(jetsam_demo_requests_total[5m:1m]))`,
 			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
 		},
+		{
+			// sum(abs(x)) is not abs(sum(x)): an instant function directly
+			// over the selector transforms the value before aggregation
+			// ever sees it, the same trap max_over_time is refused for
+			// above. Before this fix, abs(m) fell into the same code path
+			// as a bare m and silently recorded Fn="" -- "no function
+			// involved" -- which is false.
+			name:  "an instant function directly over the selector refuses",
+			query: `sum by (path) (abs(jetsam_demo_requests_total))`,
+			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -202,4 +227,92 @@ func TestExperimentalAggregatorsDoNotParse(t *testing.T) {
 	if _, err := LabelsNeeded(`limitk(5, jetsam_demo_requests_total)`, "jetsam_demo_requests_total"); err == nil {
 		t.Fatal("limitk parsed; if this Prometheus gained the experimental feature, LabelsNeeded must classify it as All")
 	}
+}
+
+// TestOneQueryMakingTwoClaimsAboutOneMetricRefuses covers the fourth instance
+// of this package's founding trap: parser.Inspect visits EVERY selector of
+// this metric in the query, but Op/OpSafe/Fn/Window are plain fields, so a
+// single query that reads the metric two different ways used to report only
+// the LAST claim visited -- and worse, the answer flipped with source order,
+// which a fixed corpus.Build could never explain. Each case here reads the
+// metric twice within ONE query under a shape that disagrees with itself.
+func TestOneQueryMakingTwoClaimsAboutOneMetricRefuses(t *testing.T) {
+	const m = "jetsam_demo_requests_total"
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "two different operators",
+			query: `sum by (path) (jetsam_demo_requests_total) / max by (path) (jetsam_demo_requests_total)`,
+		},
+		{
+			name:  "two different windows, order one way",
+			query: `sum by (path) (rate(jetsam_demo_requests_total[5m])) / sum by (path) (rate(jetsam_demo_requests_total[10m]))`,
+		},
+		{
+			name:  "two different windows, order reversed",
+			query: `sum by (path) (rate(jetsam_demo_requests_total[10m])) / sum by (path) (rate(jetsam_demo_requests_total[5m]))`,
+		},
+		{
+			name:  "one side rated, the other read instantly",
+			query: `sum by (path) (rate(jetsam_demo_requests_total[5m])) / sum by (path) (jetsam_demo_requests_total)`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := LabelsNeeded(tc.query, m)
+			if err != nil {
+				t.Fatalf("LabelsNeeded: %v", err)
+			}
+			if !got.All {
+				t.Fatalf("All = false, want true -- one LabelNeed cannot carry two disagreeing claims about the same metric (Fn=%q Window=%v Op=%q)",
+					got.Fn, got.Window, got.Op)
+			}
+			if got.Blocker == "" {
+				t.Error("Blocker is empty, want a reason naming the conflicting claims")
+			}
+		})
+	}
+}
+
+// TestAJoinBelowTheAggregateRefusesButAboveItDoesNot is Critical B: a bare
+// vector-vector join BELOW the aggregate matches on every label of the raw
+// series by default, so collapsing this metric would not just change the
+// numbers, it would make the join match nothing at all. The exact same
+// binary-operator shape ABOVE the aggregate is a different, safe thing --
+// it matches on labels the aggregation already collapsed to -- and must not
+// be caught by this rule; it still refuses here, but for the window
+// disagreement (TestOneQueryMakingTwoClaimsAboutOneMetricRefuses' own
+// concern), not for a join. The Blocker text is what tells the two apart.
+func TestAJoinBelowTheAggregateRefusesButAboveItDoesNot(t *testing.T) {
+	const m = "jetsam_demo_requests_total"
+
+	t.Run("a bare join below the aggregate refuses, naming the join", func(t *testing.T) {
+		query := `sum by (path) (rate(jetsam_demo_requests_total[5m]) + rate(other_total[5m]))`
+		got, err := LabelsNeeded(query, m)
+		if err != nil {
+			t.Fatalf("LabelsNeeded: %v", err)
+		}
+		if !got.All {
+			t.Fatal("All = false, want true -- a bare `+` below the aggregate matches on every label of the raw series")
+		}
+		if !strings.Contains(got.Blocker, "matched against another vector") {
+			t.Errorf("Blocker = %q, want it to name the join", got.Blocker)
+		}
+	})
+
+	t.Run("the same binary operator above the aggregate is not a join-below refusal", func(t *testing.T) {
+		query := `sum by (path) (rate(jetsam_demo_requests_total[5m])) / sum by (path) (rate(jetsam_demo_requests_total[10m]))`
+		got, err := LabelsNeeded(query, m)
+		if err != nil {
+			t.Fatalf("LabelsNeeded: %v", err)
+		}
+		if !got.All {
+			t.Fatal("All = false, want true -- the two sides disagree on the window")
+		}
+		if strings.Contains(got.Blocker, "matched against another vector") {
+			t.Errorf("Blocker = %q -- the join-below-the-aggregate check fired for a binary operator ABOVE the aggregate, which is over-broad", got.Blocker)
+		}
+	})
 }

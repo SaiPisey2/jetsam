@@ -35,6 +35,21 @@ type LabelNeed struct {
 	// So the thing worth recording is the rate, not the metric.
 	Fn     string
 	Window time.Duration
+	// Blocker is a human-readable reason for the refusals this file can
+	// name specifically: an unsupported range function, a subquery, an
+	// instant function applied before aggregation, a vector join below the
+	// aggregate, or two selectors of the same metric in one query making
+	// conflicting claims. Left empty for the refusals whose generic reason
+	// is already accurate (a bare unaggregated selector, `without`, an
+	// aggregator that preserves every series).
+	//
+	// It exists because "some consumer needs every label" is FALSE for a
+	// consumer whose real requirement this file worked out just fine before
+	// an unrelated function or subquery forced the refusal. A reader who
+	// opens the rule and sees `sum by (path)` concludes jetsam is wrong --
+	// worse than no reason at all, and this package has shipped that
+	// mistake before.
+	Blocker string
 }
 
 // recordableRangeFns lists the range functions this package knows how to
@@ -96,6 +111,10 @@ func LabelsNeeded(query, metric string) (LabelNeed, error) {
 
 	var need LabelNeed
 	req := map[string]bool{}
+	// opSeen and fnSeen track whether an EARLIER selector of this same
+	// metric, in this same query, already claimed an Op or an Fn/Window --
+	// see the comment where they are checked, below.
+	var opSeen, fnSeen bool
 
 	parser.Inspect(expr, func(n parser.Node, path []parser.Node) error {
 		switch v := n.(type) {
@@ -117,8 +136,22 @@ func LabelsNeeded(query, metric string) (LabelNeed, error) {
 				need.All = true
 				return nil
 			}
-			need.Op = agg.Op.String()
-			need.OpSafe = composes[agg.Op]
+
+			op := agg.Op.String()
+			opSafe := composes[agg.Op]
+			if opSeen && op != need.Op {
+				// parser.Inspect visits EVERY selector of this metric in the
+				// query, and Op is a single field: if this metric appears
+				// twice under different operators (`sum(...) / max(...)`),
+				// the second assignment would silently speak for both,
+				// which is the same "one claim wins" trap Fn/Window guard
+				// against below. Refuse rather than let visit order decide.
+				need.All = true
+				need.Blocker = fmt.Sprintf("this query aggregates it under more than one operator: %s and %s", need.Op, op)
+				return nil
+			}
+			opSeen, need.Op, need.OpSafe = true, op, opSafe
+
 			if preservesEverySeries[agg.Op] {
 				need.All = true
 				return nil
@@ -130,13 +163,29 @@ func LabelsNeeded(query, metric string) (LabelNeed, error) {
 				need.All = true
 				return nil
 			}
-			fn, window, refuse := rangeFn(path, aggIdx)
-			if refuse {
+			if reason, unsafe := joinBelowAggregate(path, aggIdx); unsafe {
 				need.All = true
+				need.Blocker = reason
 				return nil
 			}
-			need.Fn = fn
-			need.Window = window
+			fn, window, unsafe, reason := rangeFn(path, aggIdx)
+			if unsafe {
+				need.All = true
+				need.Blocker = reason
+				return nil
+			}
+			if fnSeen && (fn != need.Fn || window != need.Window) {
+				// Same trap as the operator check above, one level down:
+				// this metric appears twice under this aggregate's reach
+				// with two different range claims (`rate(m[5m]) /
+				// rate(m[10m])`, or one side rated and the other read
+				// instantly) and Fn/Window can only carry one of them.
+				need.All = true
+				need.Blocker = fmt.Sprintf("this query applies more than one range claim to it: %s and %s",
+					describeFn(need.Fn, need.Window), describeFn(fn, window))
+				return nil
+			}
+			fnSeen, need.Fn, need.Window = true, fn, window
 			for _, g := range agg.Grouping {
 				req[g] = true
 			}
@@ -234,32 +283,89 @@ func enclosingAggregate(path []parser.Node) (*parser.AggregateExpr, int) {
 // for is: the selector's immediate parent is a *parser.MatrixSelector and
 // its parent is a *parser.Call naming a recordable function.
 //
-// refuse is true whenever this cannot be answered safely: a
-// *parser.SubqueryExpr anywhere between the selector and the aggregate (as
-// in `rate(m[5m:1m])`) evaluates the selector over a sliding window before
-// rate ever sees it, which this package does not attempt to reason about;
-// and a matrix selector under any function outside recordableRangeFns --
-// max_over_time, avg_over_time, or any other -- does not commute with
-// pre-aggregation the way rate, irate and increase do.
-func rangeFn(path []parser.Node, aggIdx int) (fn string, window time.Duration, refuse bool) {
+// unsafe is true, with reason explaining why, whenever this cannot be
+// answered safely:
+//
+//   - a *parser.SubqueryExpr anywhere between the selector and the
+//     aggregate (as in `rate(m[5m:1m])`) evaluates the selector over a
+//     sliding window before rate ever sees it, which this package does not
+//     attempt to reason about;
+//   - a matrix selector under any function outside recordableRangeFns --
+//     max_over_time, avg_over_time, or any other -- does not commute with
+//     pre-aggregation the way rate, irate and increase do;
+//   - an INSTANT function applied directly to the selector -- abs(m),
+//     clamp_min(m, 0) -- transforms the value before aggregation ever sees
+//     it, and sum(abs(x)) is not abs(sum(x)) any more than sum(rate(x)) is
+//     rate(sum(x)). This is checked by the selector's IMMEDIATE parent
+//     alone, so a function nested under a range function is unaffected:
+//     `label_replace(rate(m[5m]))` has a *MatrixSelector between the
+//     selector and label_replace's Call, and that shape hits the case
+//     above instead.
+func rangeFn(path []parser.Node, aggIdx int) (fn string, window time.Duration, unsafe bool, reason string) {
 	for i := aggIdx + 1; i < len(path); i++ {
 		if _, ok := path[i].(*parser.SubqueryExpr); ok {
-			return "", 0, true
+			return "", 0, true, "a subquery evaluates it over a sliding window before any range function sees it"
 		}
 	}
-	if len(path) < 2 {
-		return "", 0, false
+	if len(path) == 0 {
+		return "", 0, false, ""
 	}
-	ms, ok := path[len(path)-1].(*parser.MatrixSelector)
-	if !ok {
-		// No matrix selector directly above the selector: either an instant
-		// function like abs(m), or nothing at all. Either way the
-		// aggregation reads an instant vector, which is Fn's zero value.
-		return "", 0, false
+	switch parent := path[len(path)-1].(type) {
+	case *parser.MatrixSelector:
+		if len(path) < 2 {
+			return "", 0, true, "a matrix selector with nothing recognisable applying it"
+		}
+		call, ok := path[len(path)-2].(*parser.Call)
+		if !ok {
+			return "", 0, true, "a matrix selector with nothing recognisable applying it"
+		}
+		if !recordableRangeFns[call.Func.Name] {
+			return "", 0, true, fmt.Sprintf("%s does not commute with pre-aggregation the way rate, irate and increase do", call.Func.Name)
+		}
+		return call.Func.Name, parent.Range, false, ""
+	case *parser.Call:
+		return "", 0, true, fmt.Sprintf("%s(...) is applied to it before aggregation, and does not commute with pre-aggregation", parent.Func.Name)
+	default:
+		// Nothing wraps the selector at all beyond the aggregate itself:
+		// the aggregation reads its instant vector directly, which is Fn's
+		// zero value.
+		return "", 0, false, ""
 	}
-	call, ok := path[len(path)-2].(*parser.Call)
-	if !ok || !recordableRangeFns[call.Func.Name] {
-		return "", 0, true
+}
+
+// joinBelowAggregate reports whether a vector-vector binary operation sits
+// between the selector and its enclosing aggregate (path[aggIdx]).
+//
+// Position is what decides this. ABOVE the aggregate, a binary operation
+// matches on labels the aggregation has already collapsed to, and the
+// BinaryExpr case in LabelsNeeded's walk already accounts for what that
+// requires. BELOW the aggregate the match happens against the RAW series --
+// a bare `+` with no `on`/`ignoring` matches on every label by default, so
+// both operands need every label just for the match to succeed, let alone
+// for the result to be correct: collapsing one would not merely change the
+// numbers, it would make every sample fail to match and the consumer return
+// nothing at all. Reasoning about a specific on()/ignoring() clause at this
+// position would have to account for how the aggregation groups relative to
+// the join keys, which this package does not attempt -- refusing
+// unconditionally is the safe, simple answer.
+//
+// A binary operation against a SCALAR (`m > 5`) has VectorMatching == nil:
+// there is no matching, so it does not trigger this.
+func joinBelowAggregate(path []parser.Node, aggIdx int) (reason string, unsafe bool) {
+	for i := aggIdx + 1; i < len(path); i++ {
+		if be, ok := path[i].(*parser.BinaryExpr); ok && be.VectorMatching != nil {
+			return "it is matched against another vector before it is aggregated, so every label must survive for the match to succeed", true
+		}
 	}
-	return call.Func.Name, ms.Range, false
+	return "", false
+}
+
+// describeFn renders one selector's range-function claim for a refusal
+// message naming a disagreement between two selectors of the same metric in
+// one query -- see the fnSeen check in LabelsNeeded.
+func describeFn(fn string, w time.Duration) string {
+	if fn == "" {
+		return "the metric itself"
+	}
+	return fn + " over " + window(w)
 }
