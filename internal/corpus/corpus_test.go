@@ -401,17 +401,39 @@ func TestNeedsUnionsAcrossEveryConsumer(t *testing.T) {
 }
 
 // One bare selector anywhere makes aggregation impossible, however many other
-// consumers aggregate neatly.
+// consumers aggregate neatly -- regardless of which order they are read in.
+// The reversed case matters on its own: folding All with a plain assignment
+// (acc.all = need.All rather than OR-ing it in) passes with the bare
+// selector last, since the last write wins, but silently clears All back to
+// false when the bare selector comes first and a well-behaved aggregator is
+// read after it.
 func TestOneBareSelectorPoisonsTheUnion(t *testing.T) {
-	c := Build(Sources{
-		Rules: []promapi.Rule{
-			{Name: "a", Group: "g", Type: "recording", Query: `sum by (path) (m_total)`},
-			{Name: "b", Group: "g", Type: "alerting", Query: `m_total > 5`},
+	cases := []struct {
+		name  string
+		rules []promapi.Rule
+	}{
+		{
+			name: "aggregating rule first",
+			rules: []promapi.Rule{
+				{Name: "a", Group: "g", Type: "recording", Query: `sum by (path) (m_total)`},
+				{Name: "b", Group: "g", Type: "alerting", Query: `m_total > 5`},
+			},
 		},
-	}, []string{"m_total"})
-
-	if !c.Needs["m_total"].All {
-		t.Error("All = false, want true -- an unaggregated selector returns every label")
+		{
+			name: "bare selector first",
+			rules: []promapi.Rule{
+				{Name: "a", Group: "g", Type: "alerting", Query: `m_total > 5`},
+				{Name: "b", Group: "g", Type: "recording", Query: `sum by (path) (m_total)`},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Build(Sources{Rules: tc.rules}, []string{"m_total"})
+			if !c.Needs["m_total"].All {
+				t.Error("All = false, want true -- an unaggregated selector returns every label")
+			}
+		})
 	}
 }
 
@@ -442,13 +464,61 @@ func TestANonComposingOperatorIsRecorded(t *testing.T) {
 }
 
 // Dashboards and logged queries contribute requirements exactly as rules do.
+//
+// The dashboard panel here also pins that folding uses the SUBSTITUTED
+// text: $__rate_interval does not parse as PromQL on its own, so if the fold
+// were ever changed to use the raw panel text instead of the substituted
+// text Extract itself analysed, this query would look unreadable and the
+// metric would refuse via All instead of contributing "path" to the union.
 func TestDashboardsAndLoggedQueriesContributeRequirements(t *testing.T) {
 	c := Build(Sources{
-		Dashboards: []grafana.Dashboard{{UID: "d", Title: "D", Queries: []string{`sum by (path) (m_total)`}}},
-		QueryLog:   &querylog.Reading{Queries: []string{`sum by (pod) (m_total)`}, Span: time.Hour},
+		Dashboards: []grafana.Dashboard{{UID: "d", Title: "D", Queries: []string{
+			`sum by (path) (rate(m_total[$__rate_interval]))`,
+		}}},
+		QueryLog: &querylog.Reading{Queries: []string{`sum by (pod) (m_total)`}, Span: time.Hour},
 	}, []string{"m_total"})
 
 	if got, want := c.Needs["m_total"].Required, []string{"path", "pod"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Required = %v, want %v", got, want)
 	}
+}
+
+// A selector with no __name__ constraint at all -- {job="api"}, or a
+// Grafana panel's {job=~"$job"} -- is charged by Resolve against every
+// metric in the inventory (Refs.MatchesEverything). LabelsNeeded, walking
+// the same AST, finds no name binding for any of those metrics and reports
+// Touches: false for each of them -- a disagreement between "which metrics
+// could this affect" and "does this query name this metric" that must
+// refuse rather than read as "needs nothing": both are the zero LabelNeed,
+// and treating them alike would plant the single most permissive
+// MetricNeed -- no label required, every operator safe -- for every metric
+// in the Prometheus, from one unaggregated rule.
+func TestANamelessSelectorRefusesEveryMetricItMightTouch(t *testing.T) {
+	all := []string{"m_total", "other_total"}
+	check := func(t *testing.T, c Corpus) {
+		t.Helper()
+		for _, m := range all {
+			n := c.Needs[m]
+			if !n.All {
+				t.Errorf("%s: All = false, want true", m)
+			}
+			if len(n.Blockers) == 0 {
+				t.Errorf("%s: Blockers empty, want a reason recorded", m)
+			}
+		}
+	}
+
+	t.Run("rule", func(t *testing.T) {
+		c := Build(Sources{
+			Rules: []promapi.Rule{{Name: "a", Group: "g", Type: "alerting", Query: `{job="api"} > 5`}},
+		}, all)
+		check(t, c)
+	})
+
+	t.Run("dashboard panel", func(t *testing.T) {
+		c := Build(Sources{
+			Dashboards: []grafana.Dashboard{{UID: "d", Title: "D", Queries: []string{`{job=~"$job"}`}}},
+		}, all)
+		check(t, c)
+	})
 }

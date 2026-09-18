@@ -19,6 +19,10 @@ type LabelNeed struct {
 	// OpSafe is whether that operator survives partial aggregation.
 	Op     string
 	OpSafe bool
+	// Touches reports whether this query reads this metric at all. It is
+	// the difference between "needs no label" and "never looked", which
+	// the rest of this struct cannot express: both are the zero value.
+	Touches bool
 }
 
 // composes lists the aggregation operators that are idempotent under partial
@@ -73,7 +77,6 @@ func LabelsNeeded(query, metric string) (LabelNeed, error) {
 
 	var need LabelNeed
 	req := map[string]bool{}
-	touches := false
 
 	parser.Inspect(expr, func(n parser.Node, path []parser.Node) error {
 		switch v := n.(type) {
@@ -81,7 +84,7 @@ func LabelsNeeded(query, metric string) (LabelNeed, error) {
 			if !selectorTouches(v, metric) {
 				return nil
 			}
-			touches = true
+			need.Touches = true
 			// Every matcher on the selector is a label the query depends on.
 			for _, m := range v.LabelMatchers {
 				if m.Name != "__name__" {
@@ -158,7 +161,7 @@ func LabelsNeeded(query, metric string) (LabelNeed, error) {
 		return nil
 	})
 
-	if !touches {
+	if !need.Touches {
 		return LabelNeed{}, nil
 	}
 	if need.All {

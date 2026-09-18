@@ -306,6 +306,20 @@ func ensureAccumulator(needs map[string]*needAccumulator, metric string) *needAc
 	return acc
 }
 
+// addBlocker records msg on acc unless it is already there. A dashboard with
+// many broken panels that all mention the same metric would otherwise pile up
+// one near-identical entry per panel in the one slice a report prints, which
+// buries the single fact an operator needs -- that this metric cannot be
+// aggregated -- under a wall of repeats of it.
+func addBlocker(acc *needAccumulator, msg string) {
+	for _, b := range acc.blockers {
+		if b == msg {
+			return
+		}
+	}
+	acc.blockers = append(acc.blockers, msg)
+}
+
 // foldUnreadable records that a query jetsam could not parse might touch
 // metric. It is folded as All -- the same refusal LabelsNeeded itself
 // defaults to on any doubt -- because a query this unreadable might need any
@@ -314,21 +328,28 @@ func ensureAccumulator(needs map[string]*needAccumulator, metric string) *needAc
 func foldUnreadable(needs map[string]*needAccumulator, metric, query string) {
 	acc := ensureAccumulator(needs, metric)
 	acc.all = true
-	acc.blockers = append(acc.blockers, fmt.Sprintf("could not parse a query that may touch it: %s", query))
+	addBlocker(acc, fmt.Sprintf("could not parse a query that may touch it: %s", query))
 }
 
 // foldNeeds folds one query's requirement for each of its metrics into the
-// corpus-wide union. metrics is the set that query is already known to
-// touch -- calling LabelsNeeded for every metric in the corpus instead would
-// plant an entry for metrics this query never mentions, since LabelsNeeded
-// silently returns the zero LabelNeed for a metric a query does not touch,
-// and a zero LabelNeed is indistinguishable from "needs nothing."
+// corpus-wide union. metrics is the set that Resolve already attributed to
+// this query, so every metric here is one Used will also carry -- but that
+// is Resolve's answer to "which metrics could this query affect", worked out
+// from the selector shape (including MatchesEverything, a name-less selector
+// like {job="api"} that Resolve conservatively charges against every metric
+// in the inventory). LabelsNeeded answers a narrower question -- "does this
+// query name this particular metric" -- and for a MatchesEverything selector
+// the two disagree by construction: LabelsNeeded finds no name binding for
+// ANY metric and reports Touches: false for all of them.
 //
-// A query's own re-parse failing here, despite Extract having already
-// succeeded on the same text, should not happen -- but this file does not
-// get to assume its own parser agrees with itself forever, so it is folded
-// the same conservative way as any other unreadable query rather than
-// ignored.
+// That disagreement must not read as "needs nothing": Touches: false and "no
+// label needed" are both the zero LabelNeed, and collapsing them would let a
+// query like `{job="api"} > 5` license deleting labels from every metric that
+// selector might actually be reading. So an untouched metric here refuses
+// instead of being skipped -- Resolve already put it in Used, and Needs must
+// carry an entry for everything in Used (see the comment on Corpus.Needs), so
+// silently skipping it would leave that promise broken as well as the label
+// data unprotected.
 func foldNeeds(needs map[string]*needAccumulator, query string, metrics []string) {
 	for _, m := range metrics {
 		need, err := LabelsNeeded(query, m)
@@ -337,6 +358,11 @@ func foldNeeds(needs map[string]*needAccumulator, query string, metrics []string
 			continue
 		}
 		acc := ensureAccumulator(needs, m)
+		if !need.Touches {
+			acc.all = true
+			addBlocker(acc, fmt.Sprintf("could not confirm which labels this query needs: %s", query))
+			continue
+		}
 		if need.All {
 			acc.all = true
 		}
