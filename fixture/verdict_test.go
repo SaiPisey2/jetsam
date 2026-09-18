@@ -134,6 +134,19 @@ func TestKnownArchetypesGradeCorrectly(t *testing.T) {
 		// without substitution. Now that the corpus reads dashboards, this
 		// is the flip that proves it: the acceptance test for this whole
 		// sub-project, not a stale expectation quietly corrected.
+		//
+		// This case alone does not attribute the flip to dashboards,
+		// though: Grafana's own auto-refresh sends every one of these
+		// dashboards' panel queries to Prometheus continuously, so the
+		// fixture's live query log also contains them, and corpus.Build
+		// folds a query-log read into Used through a completely different
+		// path than a dashboard read. A verdict computed from the full
+		// liveSources corpus would flip both canaries even if the
+		// dashboard fetch were silently broken. See
+		// TestDashboardsAloneFlipTheDashboardCanaries, which excludes the
+		// query log to isolate the dashboard path, and
+		// TestRulesAloneLeaveTheDashboardCanariesUnreferenced, which pins
+		// the before-state with neither dashboards nor the query log.
 		{
 			metric: "node_scrape_collector_duration_seconds",
 			want:   verdict.GradeUsed,
@@ -177,6 +190,73 @@ func TestKnownArchetypesGradeCorrectly(t *testing.T) {
 			t.Errorf("%s grades %q, want %q (%s)", tc.metric, got, tc.want, tc.why)
 		}
 	}
+}
+
+// dashboardCanaries are the two metrics pinned unreferenced in v0.1
+// specifically because only a dashboard reads them. Both tests below
+// share the list so the flip and its before-state are checked against
+// exactly the same metrics.
+var dashboardCanaries = []string{"jetsam_demo_requests_total", "node_scrape_collector_duration_seconds"}
+
+// TestDashboardsAloneFlipTheDashboardCanaries isolates the dashboard
+// evidence source from the query log. Grafana's own auto-refresh sends
+// every panel query in these dashboards to Prometheus continuously, and
+// the fixture's live query log therefore contains them too (see
+// VENDOR.md) -- so a verdict computed from the full liveSources corpus
+// cannot tell whether a canary flipped because the dashboard fetch
+// actually worked, or only because the query log independently
+// re-derived the same evidence through a different path. Excluding the
+// query log here makes the dashboard path the only thing that could
+// produce the flip.
+func TestDashboardsAloneFlipTheDashboardCanaries(t *testing.T) {
+	inv, src := liveSources(t)
+	src.QueryLog = nil
+	src.LogQualifies = false
+
+	res := verdict.Compute(inv, corpus.Build(src, metricNames(inv)))
+	for _, m := range dashboardCanaries {
+		v := verdictFor(t, res, m)
+		if v.Grade != verdict.GradeUsed {
+			t.Errorf("%s grades %q with dashboards read and no query log, want used", m, v.Grade)
+		}
+	}
+}
+
+// TestRulesAloneLeaveTheDashboardCanariesUnreferenced pins the
+// before-state that made dashboardCanaries canaries in the first place:
+// with neither dashboards nor the query log, no vendored rule names
+// either metric, so both must grade unreferenced. Without this half,
+// TestDashboardsAloneFlipTheDashboardCanaries proves nothing -- flipping
+// a metric that was already used would not be a flip.
+func TestRulesAloneLeaveTheDashboardCanariesUnreferenced(t *testing.T) {
+	inv, src := liveSources(t)
+	src.Dashboards = nil
+	src.DashboardsConfigured = false
+	src.DashboardsReachable = false
+	src.QueryLog = nil
+	src.LogQualifies = false
+
+	res := verdict.Compute(inv, corpus.Build(src, metricNames(inv)))
+	for _, m := range dashboardCanaries {
+		v := verdictFor(t, res, m)
+		if v.Grade != verdict.GradeUnreferenced {
+			t.Errorf("%s grades %q with no dashboard and no query log, want unreferenced", m, v.Grade)
+		}
+	}
+}
+
+// verdictFor returns one metric's verdict, failing loudly if the metric is
+// absent from the result entirely -- an absent canary would otherwise read
+// as "not droppable" or "not used" and pass a test for the wrong reason.
+func verdictFor(t *testing.T, res verdict.Result, metric string) verdict.Verdict {
+	t.Helper()
+	for _, v := range res.Verdicts {
+		if v.Metric == metric {
+			return v
+		}
+	}
+	t.Fatalf("%s is absent from the inventory entirely -- is its target up?", metric)
+	return verdict.Verdict{}
 }
 
 // TestRecordingRuleOutputsAreProtected checks the rule that stops jetsam
@@ -230,15 +310,54 @@ func TestTheCorpusBlocksNothing(t *testing.T) {
 	}
 }
 
+// withholdingBaseline builds a corpus with nothing droppable except one
+// known metric.
+//
+// The fixture's live query log cannot be used for this: Grafana's own
+// auto-refresh and jetsam's own scans put nearly every metric in it (see
+// VENDOR.md), so with the live log wired in, essentially nothing is ever
+// droppable to begin with, regardless of LogQualifies or dashboard
+// reachability -- a test that starts there cannot show the withholding
+// logic taking anything away. This instead supplies an explicit,
+// restricted query log that only mentions "up", with no dashboards, so
+// unqueriedCanary -- read by no vendored rule -- reaches GradeUnqueried
+// and Droppable=true. That is the real before-state the two tests below
+// need before they can assert an override takes it away.
+func withholdingBaseline(t *testing.T) (inventory.Inventory, corpus.Sources, []string) {
+	t.Helper()
+	inv, src := liveSources(t)
+	src.Dashboards = nil
+	src.DashboardsConfigured = false
+	src.DashboardsReachable = false
+	src.QueryLog = &querylog.Reading{Queries: []string{"up"}}
+	src.LogQualifies = true
+	names := metricNames(inv)
+
+	res := verdict.Compute(inv, corpus.Build(src, names))
+	if v := verdictFor(t, res, unqueriedCanary); v.Grade != verdict.GradeUnqueried || !v.Droppable {
+		t.Fatalf("setup invalid: %s grades %q droppable=%v in the withholding baseline, want unqueried/true -- "+
+			"the test using this baseline would be vacuous", unqueriedCanary, v.Grade, v.Droppable)
+	}
+	return inv, src, names
+}
+
+// unqueriedCanary is read by no vendored rule (see
+// TestRulesAloneLeaveTheDashboardCanariesUnreferenced's sibling metrics)
+// and is deliberately absent from withholdingBaseline's restricted query
+// log, so it is the metric whose droppability the two tests below can
+// watch move.
+const unqueriedCanary = "jetsam_demo_requests_total"
+
 // A log shorter than the configured minimum must not license a drop, however
 // complete it looks.
 func TestAShortQueryLogLicensesNothing(t *testing.T) {
-	inv, src := liveSources(t)
+	inv, src, names := withholdingBaseline(t)
+
 	src.LogQualifies = false
-	res := verdict.Compute(inv, corpus.Build(src, metricNames(inv)))
+	res := verdict.Compute(inv, corpus.Build(src, names))
 	for _, v := range res.Verdicts {
 		if v.Droppable {
-			t.Fatalf("%s was droppable with a non-qualifying log", v.Metric)
+			t.Errorf("%s was droppable with a non-qualifying log", v.Metric)
 		}
 	}
 }
@@ -246,14 +365,15 @@ func TestAShortQueryLogLicensesNothing(t *testing.T) {
 // Grafana configured but unreachable withholds every drop while scan still
 // works.
 func TestUnreachableGrafanaWithholdsEveryDrop(t *testing.T) {
-	inv, src := liveSources(t)
+	inv, src, names := withholdingBaseline(t)
+
 	src.DashboardsConfigured = true
 	src.DashboardsReachable = false
 	src.Dashboards = nil
-	res := verdict.Compute(inv, corpus.Build(src, metricNames(inv)))
+	res := verdict.Compute(inv, corpus.Build(src, names))
 	for _, v := range res.Verdicts {
 		if v.Droppable {
-			t.Fatalf("%s was droppable while dashboard evidence was unavailable", v.Metric)
+			t.Errorf("%s was droppable while dashboard evidence was unavailable", v.Metric)
 		}
 	}
 }

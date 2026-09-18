@@ -129,6 +129,45 @@ known queries are present and logs the breakdown; nothing in the suite
 fails if the ratio moves, because it is a property of how long the stack
 has been running, not of the fixture's configuration.
 
+### The live log is contaminated, and cannot stand in for "no evidence"
+
+Grafana's own dashboard auto-refresh sends every one of a dashboard's
+panel queries to Prometheus on its own schedule, and jetsam's own
+integration tests query Prometheus too. Both land in
+`fixture/querylog/queries.log` as ordinary `httpRequest` entries,
+indistinguishable from a human's read. Measured against this fixture: a
+corpus built from the live log alone reads roughly 650 distinct queries
+and marks on the order of 600+ of the roughly 660 metrics in the
+inventory as used -- effectively the whole surface, whether or not any
+dashboard or rule ever named a given metric.
+
+Two consequences follow, and both bit an earlier version of this test
+suite:
+
+- **The live log cannot be used to prove a metric's dashboard/rule
+  evidence is what makes it `used`.** Almost everything is `used` via the
+  query log regardless. A test that wants to isolate a single evidence
+  source (dashboards, or the absence of one) has to either exclude
+  `QueryLog` entirely or replace it with an explicit, short, hand-written
+  `querylog.Reading{Queries: [...]}` -- see `liveSources`,
+  `TestDashboardsAloneFlipTheDashboardCanaries`, and the
+  `withholdingBaseline` helper in `fixture/verdict_test.go`.
+- **The live log cannot be used to prove a withholding rule actually
+  withholds anything.** With the live log wired in, essentially every
+  metric is already `used`, so `Droppable` is `false` for nearly the
+  whole inventory before any override is applied. A test asserting
+  "nothing is droppable" against that baseline is true regardless of
+  whether the code under test runs at all -- `TestAShortQueryLogLicensesNothing`
+  and `TestUnreachableGrafanaWithholdsEveryDrop` originally asserted
+  exactly this and both kept passing with the withholding branch in
+  `internal/verdict.Compute` disabled outright. Both now build a
+  restricted, explicit query log first to create a real droppable metric,
+  then assert the override under test takes it away.
+
+Whoever relies on this fixture's query log for anything beyond "the file
+exists and contains recognizable entries" needs to know this before
+trusting it as an independent evidence source in a test.
+
 ## The dashboard canary
 
 `fixture/verdict_test.go`'s `grade()` now builds its corpus from all
@@ -148,15 +187,43 @@ dashboards entered the corpus. Both now grade `used`, in
 
 That flip is the acceptance test for this whole sub-project: a canary
 that did not sing would mean the dashboards were not really in the
-corpus, regardless of anything else passing.
+corpus, regardless of anything else passing. Because the live query log
+also contains every dashboard's auto-refreshed queries (see above), this
+flip alone does not prove the dashboard path specifically works --
+`TestDashboardsAloneFlipTheDashboardCanaries` excludes the query log to
+isolate it, and `TestRulesAloneLeaveTheDashboardCanariesUnreferenced`
+pins the before-state with neither dashboards nor the query log, so the
+flip is attributed to dashboards and nothing else.
+
+### Differential oracle against mimirtool
 
 A differential oracle, `fixture/oracle_test.go`, checks jetsam's answer
 against `mimirtool analyze grafana` + `analyze prometheus` -- an
-independent implementation of the dashboard half of this question. It
-asserts jetsam's used-set is a superset of mimirtool's dashboard-derived
-set and logs the rest; jetsam's wider set (rules, the recording-rule
-closure, and the query log, on top of dashboards) is expected to contain
-metrics mimirtool's dashboard-only view does not. `mimirtool analyze
-ruler` does not work against a plain Prometheus -- it calls a Mimir
-ruler API a plain Prometheus does not serve -- so the oracle covers
-dashboards only.
+independent implementation of the dashboard half of this question. It is
+compared against a corpus built from `Dashboards` alone (not the full
+`liveSources` corpus, for the same contamination reason described
+above), and asserts jetsam's dashboard-only used-set is a superset of
+mimirtool's. `mimirtool analyze ruler` does not work against a plain
+Prometheus -- it calls a Mimir ruler API a plain Prometheus does not
+serve -- so the oracle covers dashboards only.
+
+Isolating the comparison this way surfaced a real, narrow gap:
+`internal/grafana.Client.Dashboards` collects panel target queries only
+(`Dashboard`'s doc comment says so explicitly -- "the queries its panels
+run"), not a dashboard's own template-variable definitions
+(`templating.list[]`, Grafana's "job"/"nodename"/"instance" dropdowns).
+The vendored dashboard's `job`, `nodename`, and `node` variables all query
+`label_values(node_uname_info, ...)`, and `node_uname_info` appears
+nowhere in any panel's target expression -- so a dashboards-only corpus
+never marks it used, while mimirtool's dashboard analysis does count it.
+Grafana genuinely issues that query to Prometheus whenever the dashboard
+loads, so this is a real evidence source jetsam's `Dashboards` reader
+does not see. It is not a production safety gap in practice: the live
+query log also captures that same read, so jetsam's actual (full-corpus)
+verdict for `node_uname_info` is unaffected -- the gap is visible only
+because the oracle now deliberately looks at dashboards in isolation, for
+the same reason it needs to. `fixture/oracle_test.go` names this
+metric-by-metric (`templateVariableMetrics`) and logs it rather than
+failing on it; whether `internal/grafana` should also scan
+`templating.list[]` is a production-code question, out of this task's
+scope, for whoever picks it up next.
