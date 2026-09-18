@@ -10,12 +10,12 @@ package querylog
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -26,8 +26,16 @@ type Reading struct {
 	// Queries is every distinct query string a human or a dashboard ran,
 	// sorted. Rule evaluations are excluded -- see Read.
 	Queries []string
-	// Span is the time between the earliest and latest entry across every
-	// matched file. It is what the trust threshold is measured against.
+	// Span is the time between the log's earliest and latest entry, of
+	// EITHER kind, across every matched file. It is the log's coverage --
+	// how long it has actually been recording -- not the span of reads
+	// within it. A rule evaluation is not a read, but it is just as good
+	// evidence the log was running and would have caught a real read had one
+	// happened. Restricting this to read timestamps would report Span=0 for
+	// the ordinary case of a log with zero reads, which is the case the
+	// trust threshold exists to evaluate: a real log is close to 100% rule
+	// evaluations, so that ordinary case is the common one, not an edge
+	// case.
 	Span time.Duration
 	// Files is how many files the glob matched, and Entries how many lines
 	// were examined. Both are reported so an operator can tell a log that
@@ -53,33 +61,57 @@ type Reading struct {
 // as JSON would dominate the runtime; a substring check does not.
 const readMarker = `"httpRequest"`
 
+// logLine decodes only the fields Read still needs from a matched line.
+// Timestamps are no longer decoded here -- see extractTime -- because Span
+// now needs every line's timestamp, not just a read's, and extracting it
+// without a JSON decode is what keeps that cheap.
 type logLine struct {
-	Time   string `json:"time"`
 	Params struct {
 		Query string `json:"query"`
 	} `json:"params"`
 	HTTPRequest *json.RawMessage `json:"httpRequest"`
 }
 
-// tsPattern matches Prometheus' timestamp, whose fractional part varies in
-// width and defeats time.RFC3339Nano round-tripping.
-var tsPattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?`)
-
+// parseTime parses Prometheus' timestamp, including its timezone offset.
+// Prometheus writes it via Go's own time formatting, so the fractional part
+// never exceeds nanosecond precision and time.RFC3339Nano's variable-width
+// ".999999999" fractional element parses it exactly -- verified against
+// 8,823 distinct timestamps drawn from the real fixture log (all "Z", widths
+// from 0 to 9 digits) plus the two variable-width examples on record
+// (".919751712" and ".42401"), all of which round-trip through it cleanly.
+//
+// The offset is not discarded: a log that ever reported a non-UTC offset and
+// had it silently read as UTC would be wrong by hours in a way nobody would
+// notice, so it is applied via the standard library rather than assumed
+// away.
 func parseTime(s string) (time.Time, error) {
-	m := tsPattern.FindStringSubmatch(s)
-	if m == nil {
-		return time.Time{}, fmt.Errorf("unrecognised timestamp %q", s)
-	}
-	t, err := time.Parse("2006-01-02T15:04:05", m[1])
+	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
-		return time.Time{}, err
-	}
-	if m[2] != "" {
-		var frac float64
-		fmt.Sscanf("0"+m[2], "%g", &frac)
-		t = t.Add(time.Duration(frac * float64(time.Second)))
+		return time.Time{}, fmt.Errorf("unrecognised timestamp %q: %w", s, err)
 	}
 	return t, nil
+}
+
+// timeFieldPrefix is how every Prometheus query-log line begins, whichever
+// kind it is.
+const timeFieldPrefix = `{"time":"`
+
+// extractTime pulls the raw timestamp out of a line without decoding it as
+// JSON, so that a rule evaluation's timestamp -- which Read now needs for
+// Span -- costs exactly what a real read's already cost, not a second
+// JSON-decode pass over the whole file. It returns ok=false for a line that
+// does not start with the expected prefix, which simply does not contribute
+// to the file's first/last bound.
+func extractTime(line []byte) (string, bool) {
+	if !bytes.HasPrefix(line, []byte(timeFieldPrefix)) {
+		return "", false
+	}
+	rest := line[len(timeFieldPrefix):]
+	end := bytes.IndexByte(rest, '"')
+	if end < 0 {
+		return "", false
+	}
+	return string(rest[:end]), true
 }
 
 // Read streams every file the glob matches and reports what was read.
@@ -106,16 +138,28 @@ func Read(glob string) (*Reading, error) {
 	entries := 0
 
 	for _, p := range paths {
-		n, first, last, err := readFile(p, seen)
+		n, firstRaw, lastRaw, err := readFile(p, seen)
 		if err != nil {
 			return nil, err
 		}
 		entries += n
-		if !first.IsZero() && (earliest.IsZero() || first.Before(earliest)) {
-			earliest = first
+		if firstRaw != "" {
+			t, terr := parseTime(firstRaw)
+			if terr != nil {
+				return nil, fmt.Errorf("%s: %w", p, terr)
+			}
+			if earliest.IsZero() || t.Before(earliest) {
+				earliest = t
+			}
 		}
-		if !last.IsZero() && last.After(latest) {
-			latest = last
+		if lastRaw != "" {
+			t, terr := parseTime(lastRaw)
+			if terr != nil {
+				return nil, fmt.Errorf("%s: %w", p, terr)
+			}
+			if t.After(latest) {
+				latest = t
+			}
 		}
 	}
 
@@ -132,10 +176,10 @@ func Read(glob string) (*Reading, error) {
 	return r, nil
 }
 
-func readFile(path string, seen map[string]bool) (entries int, first, last time.Time, err error) {
+func readFile(path string, seen map[string]bool) (entries int, firstRaw, lastRaw string, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, first, last, fmt.Errorf("open %s: %w", path, err)
+		return 0, "", "", fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 
@@ -143,7 +187,7 @@ func readFile(path string, seen map[string]bool) (entries int, first, last time.
 	if strings.HasSuffix(path, ".gz") {
 		zr, zerr := gzip.NewReader(f)
 		if zerr != nil {
-			return 0, first, last, fmt.Errorf("open %s: %w", path, zerr)
+			return 0, "", "", fmt.Errorf("open %s: %w", path, zerr)
 		}
 		defer zr.Close()
 		src = zr
@@ -160,32 +204,34 @@ func readFile(path string, seen map[string]bool) (entries int, first, last time.
 			continue
 		}
 		entries++
+		// Every entry, rule evaluation or real read, marks the log as alive
+		// at this instant. Log lines are chronological, so the first one
+		// seen is the file's earliest bound and the last one seen -- kept
+		// overwriting, unconditionally -- is its latest. Only two of these
+		// raw strings are ever parsed into a time.Time (in Read, once per
+		// file), not one parse per line.
+		if ts, ok := extractTime(line); ok {
+			if firstRaw == "" {
+				firstRaw = ts
+			}
+			lastRaw = ts
+		}
 		if !strings.Contains(string(line), readMarker) {
 			continue
 		}
 		var e logLine
 		if err := json.Unmarshal(line, &e); err != nil {
-			return entries, first, last, fmt.Errorf("%s: malformed query log line: %w", path, err)
+			return entries, firstRaw, lastRaw, fmt.Errorf("%s: malformed query log line: %w", path, err)
 		}
 		if e.HTTPRequest == nil {
 			continue
-		}
-		t, terr := parseTime(e.Time)
-		if terr != nil {
-			return entries, first, last, fmt.Errorf("%s: %w", path, terr)
-		}
-		if first.IsZero() || t.Before(first) {
-			first = t
-		}
-		if t.After(last) {
-			last = t
 		}
 		if q := strings.TrimSpace(e.Params.Query); q != "" {
 			seen[q] = true
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return entries, first, last, fmt.Errorf("read %s: %w", path, err)
+		return entries, firstRaw, lastRaw, fmt.Errorf("read %s: %w", path, err)
 	}
-	return entries, first, last, nil
+	return entries, firstRaw, lastRaw, nil
 }

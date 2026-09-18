@@ -147,3 +147,70 @@ func TestMalformedLineIsAnError(t *testing.T) {
 		t.Fatal("want an error on a malformed line -- a log jetsam cannot read must not look like one with no reads")
 	}
 }
+
+// If Span were computed only from read timestamps, a log containing zero
+// reads -- the ordinary case, since a real log is close to 100% rule
+// evaluations -- would report Span=0 no matter how long it had actually been
+// running. That would silently disable the unqueried grade in production,
+// however many months of coverage existed, because the trust threshold gates
+// on Span >= a minimum window.
+func TestSpanCoversRuleEvaluationsToo(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "queries.log",
+		entry("2026-08-01T00:00:00Z", "rule_one", "rule")+
+			entry("2026-08-31T00:00:00Z", "rule_two", "rule"))
+
+	r, err := Read(filepath.Join(dir, "queries.log"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	want := 30 * 24 * time.Hour
+	if r.Span != want {
+		t.Errorf("Span = %v, want %v -- rule evaluations are evidence the log was running, even with zero reads", r.Span, want)
+	}
+	if len(r.Queries) != 0 {
+		t.Errorf("Queries = %v, want none -- a log with no reads must report none", r.Queries)
+	}
+}
+
+// The first and last entries in the file set the bound regardless of kind; a
+// read in the middle must not narrow it.
+func TestSpanUsesFirstAndLastEntryRegardlessOfKind(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "queries.log",
+		entry("2026-08-01T00:00:00Z", "opening_rule", "rule")+
+			entry("2026-08-15T00:00:00Z", "middle_read", "read")+
+			entry("2026-08-31T00:00:00Z", "closing_rule", "rule"))
+
+	r, err := Read(filepath.Join(dir, "queries.log"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	want := 30 * 24 * time.Hour
+	if r.Span != want {
+		t.Errorf("Span = %v, want %v -- must cover the opening and closing entries, not just the read in the middle", r.Span, want)
+	}
+	if len(r.Queries) != 1 || r.Queries[0] != "middle_read" {
+		t.Errorf("Queries = %v, want just the middle read", r.Queries)
+	}
+}
+
+// Prometheus writes UTC in practice, but a log that ever reported a real
+// offset must not be silently misread as UTC -- a wrong span by hours is
+// exactly the kind of error nobody would notice. parseTime applies the
+// offset via the standard library rather than discarding it.
+func TestParseTimeHandlesTimezoneOffsets(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "queries.log",
+		entry("2026-08-01T05:00:00+05:00", "early_rule", "rule")+ // = 2026-08-01T00:00:00Z
+			entry("2026-08-01T02:00:00Z", "late_read", "read")) // = 2026-08-01T02:00:00Z
+
+	r, err := Read(filepath.Join(dir, "queries.log"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	want := 2 * time.Hour
+	if r.Span != want {
+		t.Errorf("Span = %v, want %v -- the +05:00 offset must be applied, not dropped", r.Span, want)
+	}
+}
