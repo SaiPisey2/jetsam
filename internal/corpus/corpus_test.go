@@ -2,6 +2,7 @@ package corpus
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -493,6 +494,160 @@ func TestDashboardsAndLoggedQueriesContributeRequirements(t *testing.T) {
 // and treating them alike would plant the single most permissive
 // MetricNeed -- no label required, every operator safe -- for every metric
 // in the Prometheus, from one unaggregated rule.
+// TestWindowRendersPrometheusDurations pins the six values the sub-project
+// brief calls out by name, and also that each rendering is usable both as a
+// PromQL range (round-tripped through the real parser inside a rate() call)
+// and as a metric-name suffix -- the two places a recording rule name
+// actually puts it.
+func TestWindowRendersPrometheusDurations(t *testing.T) {
+	metricNameSuffix := regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{5 * time.Minute, "5m"},
+		{10 * time.Minute, "10m"},
+		{time.Hour, "1h"},
+		{90 * time.Second, "1m30s"},
+		{36 * time.Hour, "1d12h"},
+		{500 * time.Millisecond, "500ms"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.want, func(t *testing.T) {
+			got := window(tc.d)
+			if got != tc.want {
+				t.Fatalf("window(%s) = %q, want %q", tc.d, got, tc.want)
+			}
+			if !metricNameSuffix.MatchString(got) {
+				t.Errorf("window(%s) = %q, not usable as a metric-name suffix", tc.d, got)
+			}
+			query := "rate(m[" + got + "])"
+			if _, err := promParser.ParseExpr(query); err != nil {
+				t.Errorf("window(%s) = %q does not parse as a PromQL range: %v", tc.d, got, err)
+			}
+		})
+	}
+}
+
+// This trimming-off-suffixes defect is the one the brief warns against by
+// name: "10m0s" trimmed of "0s" and then "0m" yields "1".
+func TestWindowDoesNotTrimSuffixes(t *testing.T) {
+	if got := window(10 * time.Minute); got == "1" {
+		t.Fatalf("window(10m) = %q -- this is the suffix-trimming defect the brief warns against", got)
+	}
+}
+
+// Two consumers that agree on the range function and window fold to a
+// single entry each -- the unanimous case a recording rule can be named
+// from.
+func TestNeedsFoldsAgreeingRangeFunctions(t *testing.T) {
+	c := Build(Sources{
+		Rules: []promapi.Rule{
+			{Name: "a", Group: "g", Type: "recording", Query: `sum by (path) (rate(m_total[5m]))`},
+			{Name: "b", Group: "g", Type: "recording", Query: `sum by (path) (rate(m_total[5m]))`},
+		},
+	}, []string{"m_total"})
+
+	n := c.Needs["m_total"]
+	if got, want := n.Fns, []string{"rate"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Fns = %v, want %v", got, want)
+	}
+	if got, want := n.Windows, []string{"5m"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Windows = %v, want %v", got, want)
+	}
+}
+
+// rate and irate over the same metric are two different functions, and the
+// fold must not merge them -- Decide refuses on this disagreement.
+func TestNeedsFoldsDisagreeingRangeFunctions(t *testing.T) {
+	c := Build(Sources{
+		Rules: []promapi.Rule{
+			{Name: "a", Group: "g", Type: "recording", Query: `sum by (path) (rate(m_total[5m]))`},
+			{Name: "b", Group: "g", Type: "recording", Query: `sum by (path) (irate(m_total[5m]))`},
+		},
+	}, []string{"m_total"})
+
+	n := c.Needs["m_total"]
+	if got, want := n.Fns, []string{"irate", "rate"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Fns = %v, want %v", got, want)
+	}
+}
+
+// The same function over two different windows is exactly as unrewritable
+// as two different functions: whichever window the recording rule picks,
+// one consumer's answer changes.
+func TestNeedsFoldsDisagreeingWindows(t *testing.T) {
+	c := Build(Sources{
+		Rules: []promapi.Rule{
+			{Name: "a", Group: "g", Type: "recording", Query: `sum by (path) (rate(m_total[5m]))`},
+			{Name: "b", Group: "g", Type: "recording", Query: `sum by (path) (rate(m_total[10m]))`},
+		},
+	}, []string{"m_total"})
+
+	n := c.Needs["m_total"]
+	if got, want := n.Windows, []string{"10m", "5m"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Windows = %v, want %v", got, want)
+	}
+}
+
+// A consumer that reads the metric's instant vector directly and one that
+// rates it are NOT the same claim on the data -- sum(m) and sum(rate(m[5m]))
+// answer different questions -- so the empty string must survive folding as
+// its own member of Fns rather than being dropped as "no function", which
+// would make this mix look unanimous.
+func TestNeedsFoldsAnInstantAndARateConsumerAsTwoEntries(t *testing.T) {
+	c := Build(Sources{
+		Rules: []promapi.Rule{
+			{Name: "a", Group: "g", Type: "recording", Query: `sum by (path) (m_total)`},
+			{Name: "b", Group: "g", Type: "recording", Query: `sum by (path) (rate(m_total[5m]))`},
+		},
+	}, []string{"m_total"})
+
+	n := c.Needs["m_total"]
+	if got, want := n.Fns, []string{"", "rate"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Fns = %v, want %v", got, want)
+	}
+}
+
+// TestFnsIsNeverEmptyForAnEntryInNeeds pins the invariant Decide's refusal
+// logic leans on: a real corpus, however it learned about a metric --
+// through a normal fold, an unparseable rule's conservative fallback, or a
+// nameless selector's forced refusal -- always gives that metric's Needs
+// entry a non-empty Fns. Decide treats an EMPTY Fns as "no function
+// involved" to stay compatible with fixtures written before Fn existed; if
+// corpus.Build ever produced one for a real entry, that leniency would
+// silently swallow a disagreement instead of refusing it.
+func TestFnsIsNeverEmptyForAnEntryInNeeds(t *testing.T) {
+	all := []string{"m_total", "other_total"}
+	check := func(t *testing.T, c Corpus) {
+		t.Helper()
+		for m, n := range c.Needs {
+			if len(n.Fns) == 0 {
+				t.Errorf("%s: Fns is empty, want at least one entry", m)
+			}
+		}
+	}
+
+	t.Run("normal fold", func(t *testing.T) {
+		c := Build(Sources{
+			Rules: []promapi.Rule{{Name: "a", Group: "g", Type: "recording", Query: `sum by (path) (m_total)`}},
+		}, all)
+		check(t, c)
+	})
+	t.Run("unparseable rule fallback", func(t *testing.T) {
+		c := Build(Sources{
+			Rules: []promapi.Rule{{Name: "a", Group: "g", Type: "alerting", Query: `rate(m_total[$interval])`}},
+		}, all)
+		check(t, c)
+	})
+	t.Run("nameless selector", func(t *testing.T) {
+		c := Build(Sources{
+			Rules: []promapi.Rule{{Name: "a", Group: "g", Type: "alerting", Query: `{job="api"} > 5`}},
+		}, all)
+		check(t, c)
+	})
+}
+
 func TestANamelessSelectorRefusesEveryMetricItMightTouch(t *testing.T) {
 	all := []string{"m_total", "other_total"}
 	check := func(t *testing.T, c Corpus) {

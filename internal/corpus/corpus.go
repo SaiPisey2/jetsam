@@ -282,6 +282,49 @@ type MetricNeed struct {
 	Ops        []string // sorted distinct operators seen, for the report
 	AllOpsSafe bool     // every operator seen composes
 	Blockers   []string // human-readable reasons aggregation is impossible
+	// Fns is the sorted distinct set of range functions applied to this
+	// metric beneath an aggregation, and Windows their ranges as Prometheus
+	// duration strings. The EMPTY STRING is a member of Fns when some
+	// consumer reads the metric's instant vector directly, so a corpus that
+	// mixes `sum(m)` with `sum(rate(m[5m]))` yields two entries and refuses.
+	// Dropping the empty string would let that mix look unanimous.
+	Fns     []string
+	Windows []string
+}
+
+// window renders a range as the duration string Prometheus writes, so 5m0s
+// reads as 5m and appears that way in a rule name.
+//
+// Do NOT build this by trimming suffixes off time.Duration.String(): "10m0s"
+// trimmed of "0s" and then of "0m" yields "1".
+func window(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	units := []struct {
+		name string
+		size time.Duration
+	}{
+		{"d", 24 * time.Hour},
+		{"h", time.Hour},
+		{"m", time.Minute},
+		{"s", time.Second},
+		{"ms", time.Millisecond},
+	}
+	var b strings.Builder
+	for _, u := range units {
+		if n := d / u.size; n > 0 {
+			fmt.Fprintf(&b, "%d%s", n, u.name)
+			d -= n * u.size
+		}
+	}
+	if d > 0 {
+		// Sub-millisecond remainder. Prometheus has no unit for it, so
+		// report the raw form rather than silently round the window a
+		// rule name is about to claim.
+		return d.String()
+	}
+	return b.String()
 }
 
 // needAccumulator folds one query's LabelNeed into a metric's running union.
@@ -291,6 +334,11 @@ type needAccumulator struct {
 	ops      map[string]bool
 	opsSafe  bool
 	blockers []string
+	// fns and windows fold LabelNeed.Fn/Window the same way ops folds Op --
+	// see MetricNeed.Fns for why the empty string is a real member rather
+	// than an absence.
+	fns     map[string]bool
+	windows map[string]bool
 }
 
 // ensureAccumulator returns the running union for metric, creating it on
@@ -300,7 +348,10 @@ type needAccumulator struct {
 func ensureAccumulator(needs map[string]*needAccumulator, metric string) *needAccumulator {
 	acc := needs[metric]
 	if acc == nil {
-		acc = &needAccumulator{required: map[string]bool{}, ops: map[string]bool{}, opsSafe: true}
+		acc = &needAccumulator{
+			required: map[string]bool{}, ops: map[string]bool{}, opsSafe: true,
+			fns: map[string]bool{}, windows: map[string]bool{},
+		}
 		needs[metric] = acc
 	}
 	return acc
@@ -329,6 +380,11 @@ func foldUnreadable(needs map[string]*needAccumulator, metric, query string) {
 	acc := ensureAccumulator(needs, metric)
 	acc.all = true
 	addBlocker(acc, fmt.Sprintf("could not parse a query that may touch it: %s", query))
+	// Every accumulator this file creates must end up with a non-empty Fns
+	// -- see the invariant note in foldNeeds -- and this is one of the two
+	// places (besides foldNeeds' own !Touches branch) that creates one
+	// without ever seeing a LabelNeed to fold a real Fn from.
+	acc.fns[""] = true
 }
 
 // foldNeeds folds one query's requirement for each of its metrics into the
@@ -361,6 +417,11 @@ func foldNeeds(needs map[string]*needAccumulator, query string, metrics []string
 		if !need.Touches {
 			acc.all = true
 			addBlocker(acc, fmt.Sprintf("could not confirm which labels this query needs: %s", query))
+			// See the invariant note below: this branch creates/touches an
+			// accumulator without a LabelNeed worth folding a real Fn from,
+			// so it records the empty string itself rather than leaving
+			// Fns to end up empty.
+			acc.fns[""] = true
 			continue
 		}
 		if need.All {
@@ -374,6 +435,20 @@ func foldNeeds(needs map[string]*needAccumulator, query string, metrics []string
 			if !need.OpSafe {
 				acc.opsSafe = false
 			}
+		}
+		// need.Fn is folded unconditionally, empty string included, unlike
+		// need.Op above: MetricNeed.Fns' contract is that the empty string
+		// IS a meaningful member (the instant-vector case), where Ops has
+		// no such member because an unaggregated query never reaches here
+		// with an Op at all. This is also what makes the invariant "a
+		// metric with a Needs entry always has a non-empty Fns" hold: every
+		// path that calls ensureAccumulator for a metric (this one,
+		// foldNeeds' !Touches branch above, and foldUnreadable) adds to fns
+		// before returning, so a MetricNeed built by needsToCorpus can never
+		// carry an empty Fns.
+		acc.fns[need.Fn] = true
+		if need.Fn != "" {
+			acc.windows[window(need.Window)] = true
 		}
 	}
 }
@@ -401,6 +476,14 @@ func needsToCorpus(needs map[string]*needAccumulator) map[string]MetricNeed {
 			n.Ops = append(n.Ops, op)
 		}
 		sort.Strings(n.Ops)
+		for fn := range acc.fns {
+			n.Fns = append(n.Fns, fn)
+		}
+		sort.Strings(n.Fns)
+		for w := range acc.windows {
+			n.Windows = append(n.Windows, w)
+		}
+		sort.Strings(n.Windows)
 		out[m] = n
 	}
 	return out
