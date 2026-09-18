@@ -3,6 +3,7 @@ package corpus
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/prometheus/prometheus/promql/parser"
 )
@@ -23,7 +24,25 @@ type LabelNeed struct {
 	// the difference between "needs no label" and "never looked", which
 	// the rest of this struct cannot express: both are the zero value.
 	Touches bool
+	// Fn is the range function applied to this metric BENEATH the
+	// aggregation -- "rate", "irate" or "increase" -- and Window is its
+	// range. Empty when the aggregation reads the metric's instant vector
+	// directly.
+	//
+	// It is recorded because summing a counter and then rating the sum is
+	// not the same as summing the rates: the sum drops when one series
+	// resets or disappears, and rate reads that drop as a counter reset.
+	// So the thing worth recording is the rate, not the metric.
+	Fn     string
+	Window time.Duration
 }
+
+// recordableRangeFns lists the range functions this package knows how to
+// pre-aggregate safely. Anything else applied over a matrix selector under
+// an aggregation refuses instead: max_over_time under sum does not commute
+// with pre-aggregation at all, and avg_over_time only commutes while the
+// series set stays fixed, which is exactly what a pod restart breaks.
+var recordableRangeFns = map[string]bool{"rate": true, "irate": true, "increase": true}
 
 // composes lists the aggregation operators that are idempotent under partial
 // aggregation: sum by (X) over sum by (X+Y) equals sum by (X) over the raw
@@ -91,7 +110,7 @@ func LabelsNeeded(query, metric string) (LabelNeed, error) {
 					req[m.Name] = true
 				}
 			}
-			agg := enclosingAggregate(path)
+			agg, aggIdx := enclosingAggregate(path)
 			if agg == nil {
 				// Not aggregated: the query returns these series as they
 				// are, so every label is part of the answer.
@@ -111,6 +130,13 @@ func LabelsNeeded(query, metric string) (LabelNeed, error) {
 				need.All = true
 				return nil
 			}
+			fn, window, refuse := rangeFn(path, aggIdx)
+			if refuse {
+				need.All = true
+				return nil
+			}
+			need.Fn = fn
+			need.Window = window
 			for _, g := range agg.Grouping {
 				req[g] = true
 			}
@@ -189,13 +215,51 @@ func selectorTouches(v *parser.VectorSelector, metric string) bool {
 	return false
 }
 
-// enclosingAggregate returns the nearest AggregateExpr above this node, or
-// nil when the selector is not aggregated at all.
-func enclosingAggregate(path []parser.Node) *parser.AggregateExpr {
+// enclosingAggregate returns the nearest AggregateExpr above this node, and
+// its index in path, or nil when the selector is not aggregated at all.
+func enclosingAggregate(path []parser.Node) (*parser.AggregateExpr, int) {
 	for i := len(path) - 1; i >= 0; i-- {
 		if a, ok := path[i].(*parser.AggregateExpr); ok {
-			return a
+			return a, i
 		}
 	}
-	return nil
+	return nil, -1
+}
+
+// rangeFn inspects the path between a selector and its enclosing aggregate
+// (path[aggIdx]) and reports the range function applied over it, if any.
+//
+// For `sum by (path) (rate(m[5m]))` the path from the aggregate down to the
+// selector is [*AggregateExpr, *Call, *MatrixSelector], so the shape to look
+// for is: the selector's immediate parent is a *parser.MatrixSelector and
+// its parent is a *parser.Call naming a recordable function.
+//
+// refuse is true whenever this cannot be answered safely: a
+// *parser.SubqueryExpr anywhere between the selector and the aggregate (as
+// in `rate(m[5m:1m])`) evaluates the selector over a sliding window before
+// rate ever sees it, which this package does not attempt to reason about;
+// and a matrix selector under any function outside recordableRangeFns --
+// max_over_time, avg_over_time, or any other -- does not commute with
+// pre-aggregation the way rate, irate and increase do.
+func rangeFn(path []parser.Node, aggIdx int) (fn string, window time.Duration, refuse bool) {
+	for i := aggIdx + 1; i < len(path); i++ {
+		if _, ok := path[i].(*parser.SubqueryExpr); ok {
+			return "", 0, true
+		}
+	}
+	if len(path) < 2 {
+		return "", 0, false
+	}
+	ms, ok := path[len(path)-1].(*parser.MatrixSelector)
+	if !ok {
+		// No matrix selector directly above the selector: either an instant
+		// function like abs(m), or nothing at all. Either way the
+		// aggregation reads an instant vector, which is Fn's zero value.
+		return "", 0, false
+	}
+	call, ok := path[len(path)-2].(*parser.Call)
+	if !ok || !recordableRangeFns[call.Func.Name] {
+		return "", 0, true
+	}
+	return call.Func.Name, ms.Range, false
 }

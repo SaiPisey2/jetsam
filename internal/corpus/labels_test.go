@@ -3,6 +3,7 @@ package corpus
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestLabelsNeeded(t *testing.T) {
@@ -15,12 +16,12 @@ func TestLabelsNeeded(t *testing.T) {
 		{
 			name:  "by grouping requires exactly those labels",
 			query: `sum by (path) (rate(jetsam_demo_requests_total[5m]))`,
-			want:  LabelNeed{Required: []string{"path"}, Op: "sum", OpSafe: true},
+			want:  LabelNeed{Required: []string{"path"}, Op: "sum", OpSafe: true, Fn: "rate", Window: 5 * time.Minute},
 		},
 		{
 			name:  "an empty grouping under sum requires nothing",
 			query: `sum(rate(jetsam_demo_requests_total[5m]))`,
-			want:  LabelNeed{Required: nil, Op: "sum", OpSafe: true},
+			want:  LabelNeed{Required: nil, Op: "sum", OpSafe: true, Fn: "rate", Window: 5 * time.Minute},
 		},
 		{
 			// topk returns its input series with every label intact. Its AST
@@ -124,6 +125,39 @@ func TestLabelsNeeded(t *testing.T) {
 			query: `sum by (path) (jetsam_demo_requests_total) / ignoring (pod) other_total`,
 			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
 		},
+		{
+			name:  "a plain aggregation over the instant vector records no function",
+			query: `sum by (path) (jetsam_demo_requests_total)`,
+			want:  LabelNeed{Required: []string{"path"}, Op: "sum", OpSafe: true, Fn: ""},
+		},
+		{
+			name:  "irate is recorded like rate",
+			query: `sum by (path) (irate(jetsam_demo_requests_total[5m]))`,
+			want:  LabelNeed{Required: []string{"path"}, Op: "sum", OpSafe: true, Fn: "irate", Window: 5 * time.Minute},
+		},
+		{
+			name:  "increase is recorded like rate",
+			query: `sum by (path) (increase(jetsam_demo_requests_total[5m]))`,
+			want:  LabelNeed{Required: []string{"path"}, Op: "sum", OpSafe: true, Fn: "increase", Window: 5 * time.Minute},
+		},
+		{
+			// max_over_time under sum does not commute with pre-aggregation
+			// at all: summing the maxima across pods is not the maximum of
+			// the summed series. Refusing costs an optimisation nobody has
+			// asked for; recording it would cost correctness.
+			name:  "an unsupported range function over the metric refuses",
+			query: `sum by (path) (max_over_time(jetsam_demo_requests_total[5m]))`,
+			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
+		},
+		{
+			// A subquery evaluates the selector over a sliding window before
+			// rate ever sees it -- a different computation from a plain
+			// rate(m[5m]) that this package does not attempt to reason
+			// about, so it refuses rather than mis-record it.
+			name:  "a subquery beneath rate refuses",
+			query: `sum(rate(jetsam_demo_requests_total[5m:1m]))`,
+			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -142,6 +176,14 @@ func TestLabelsNeeded(t *testing.T) {
 			}
 			if got.OpSafe != tc.want.OpSafe {
 				t.Errorf("OpSafe = %v, want %v", got.OpSafe, tc.want.OpSafe)
+			}
+			if !got.All {
+				if got.Fn != tc.want.Fn {
+					t.Errorf("Fn = %q, want %q", got.Fn, tc.want.Fn)
+				}
+				if got.Window != tc.want.Window {
+					t.Errorf("Window = %v, want %v", got.Window, tc.want.Window)
+				}
 			}
 		})
 	}
