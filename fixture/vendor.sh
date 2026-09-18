@@ -33,4 +33,4 @@ curl -fsSL "https://grafana.com/api/dashboards/${DASHBOARD_ID}/revisions/${DASHB
 
 echo
 echo "vendored."
-echo "Run 'go test ./demo/ -run TestVendored' to check them against VENDOR.md."
+echo "Run 'go test ./fixture/ -run TestVendored' to check them against VENDOR.md."

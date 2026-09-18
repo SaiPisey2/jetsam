@@ -1,28 +1,27 @@
 # Vendored fixtures
 
-`demo/` holds two unrelated things. `demo.sh` and `record.sh` are the
-tooling that records the README's GIF; they run against the public
-Prometheus demo instance on the internet and share nothing with the
-compose stack — no config, no data, no assertions. Everything else in
-this directory is the local compose fixture the tests run against, which
-is not a demo and is not referenced by the README. Do not tune fixture
-data to make the GIF read better: the GIF never sees it.
+`fixture/` is the local compose stack the tests run against; it is not a
+demo and is not referenced by the README. The README's GIF is recorded by
+`demo/demo.sh` and `demo/record.sh`, which run against the public
+Prometheus demo instance on the internet and share nothing with this
+stack — no config, no data, no assertions. Do not tune fixture data to
+make the GIF read better: the GIF never sees it.
 
-Everything here is fetched by `demo/vendor.sh` and committed. Nothing here
+Everything here is fetched by `fixture/vendor.sh` and committed. Nothing here
 is hand-edited. These artifacts decide what the stack counts as a "used"
 metric, and they were written by people with no knowledge of this project
 — which is the only reason they are worth testing against.
 
-Bumping a pin: edit the version in `demo/vendor.sh`, re-run it, then run
-`go test ./demo/ -run TestVendored`. It will fail, telling you exactly
+Bumping a pin: edit the version in `fixture/vendor.sh`, re-run it, then run
+`go test ./fixture/ -run TestVendored`. It will fail, telling you exactly
 which counts moved.
 
 Every count pinned from a vendored artifact lives in exactly two places:
-the tables in this file, and the top of `demo/vendor_test.go` -- the
+the tables in this file, and the top of `fixture/vendor_test.go` -- the
 `wantGroups`, `wantRules`, `wantRecording`, `wantAlerting`,
 `wantPanelQueries` and `wantParsingQueries` constants, plus the per-file
-`vendoredRuleFiles` table beside them. `demo/stack_test.go` and
-`demo/verdict_test.go` reference those constants rather than repeating
+`vendoredRuleFiles` table beside them. `fixture/stack_test.go` and
+`fixture/verdict_test.go` reference those constants rather than repeating
 the numbers, so updating the constants and this file in the same commit
 is the whole procedure.
 
@@ -31,7 +30,7 @@ is the whole procedure.
 Source: `prometheus-operator/kube-prometheus`, `manifests/`
 Pin: `v0.18.0`
 Fetched: 2026-09-18
-Transform: `demo/vendortool` lifts `spec.groups` out of the
+Transform: `fixture/vendortool` lifts `spec.groups` out of the
 `PrometheusRule` custom resource into a plain Prometheus rule file.
 
 | File | Groups | Rules | Recording | Alerting |
@@ -40,7 +39,7 @@ Transform: `demo/vendortool` lifts `spec.groups` out of the
 | `prometheus/rules/prometheus.yaml` | 1 | 23 | 0 | 23 |
 | **total** | **3** | **64** | **15** | **49** |
 
-The scrape job names in `demo/prometheus/prometheus.yml` are chosen to
+The scrape job names in `fixture/prometheus/prometheus.yml` are chosen to
 match these rules' selectors, not the other way round: every node-exporter
 rule selects `job="node-exporter"`, and every prometheus rule selects
 `job="prometheus-k8s", namespace="monitoring"`. The rules are the upstream
@@ -86,7 +85,7 @@ and must not treat "most queries parsed" as good enough.
 
 ## Container images
 
-Pinned by digest in `demo/docker-compose.yml`.
+Pinned by digest in `fixture/docker-compose.yml`.
 
 | Image | Version | Digest |
 | --- | --- | --- |
@@ -97,10 +96,10 @@ Pinned by digest in `demo/docker-compose.yml`.
 ## Query log
 
 Query logging is turned on via `global.query_log_file` in
-`demo/prometheus/prometheus.yml`, not a CLI flag -- `--query.log-file`
+`fixture/prometheus/prometheus.yml`, not a CLI flag -- `--query.log-file`
 does not exist in Prometheus v3.13.0 and crashes the server on startup.
-The destination is bind-mounted to `demo/querylog/queries.log` on the
-host. `demo/query.sh` issues 3 queries.
+The destination is bind-mounted to `fixture/querylog/queries.log` on the
+host. `fixture/query.sh` issues 3 queries.
 
 ### Composition of the log (a property, not a pin)
 
@@ -109,7 +108,7 @@ a count to keep up to date; the numbers move with every second the stack
 runs. The stable property is the one worth knowing: rule evaluations
 dominate the query log. They are above 95% of entries within moments of
 startup and climb towards ~99.5% the longer the stack runs, because
-`demo/query.sh`'s reads are one-shot while rule evaluation is continuous.
+`fixture/query.sh`'s reads are one-shot while rule evaluation is continuous.
 
 Entries carrying a `ruleGroup` field are the server evaluating its own
 rules; a real read carries an `httpRequest` field instead. Sub-project B

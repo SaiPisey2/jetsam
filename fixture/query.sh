@@ -10,7 +10,7 @@ set -euo pipefail
 prom=${PROM_URL:-http://localhost:9090}
 
 # This query list is asserted verbatim (as issuedQueries) by
-# TestQueryLogCapturesTheKnownQueries in demo/stack_test.go. Edit one,
+# TestQueryLogCapturesTheKnownQueries in fixture/stack_test.go. Edit one,
 # edit the other.
 queries=(
 	'sum by (mode) (rate(node_cpu_seconds_total[5m]))'

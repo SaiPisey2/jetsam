@@ -51,4 +51,4 @@ key=$(curl -sf -u "$admin" -X POST "$grafana/api/serviceaccounts/$id/tokens" \
 printf '%s\n' "$key" >.token
 
 [ -s .token ] || { echo "token creation returned no key" >&2; exit 1; }
-echo "wrote demo/grafana/.token"
+echo "wrote fixture/grafana/.token"

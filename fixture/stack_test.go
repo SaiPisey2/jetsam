@@ -1,6 +1,6 @@
 //go:build integration
 
-package demo
+package fixture
 
 import (
 	"encoding/json"
@@ -59,14 +59,14 @@ func TestStackLoadsEveryVendoredRule(t *testing.T) {
 		}
 	}
 	if len(body.Data.Groups) != wantGroups || rules != wantRules || recording != wantRecording {
-		t.Errorf("prometheus loaded %d groups / %d rules / %d recording, want %d / %d / %d (see demo/VENDOR.md)",
+		t.Errorf("prometheus loaded %d groups / %d rules / %d recording, want %d / %d / %d (see fixture/VENDOR.md)",
 			len(body.Data.Groups), rules, recording, wantGroups, wantRules, wantRecording)
 	}
 }
 
 // wantJobs is the exact set of scrape jobs the stack configures. The
 // names are dictated by the vendored rules' selectors, not chosen: see
-// the comment in demo/prometheus/prometheus.yml.
+// the comment in fixture/prometheus/prometheus.yml.
 var wantJobs = []string{"prometheus-k8s", "node-exporter", "loadgen"}
 
 // TestEveryScrapeTargetIsUp catches the failure that makes every later
@@ -175,7 +175,7 @@ func TestGrafanaServesBothDashboards(t *testing.T) {
 	}
 }
 
-// issuedQueries are exactly the queries demo/query.sh sends. Matching the
+// issuedQueries are exactly the queries fixture/query.sh sends. Matching the
 // full query string, rather than a metric name appearing somewhere in the
 // log, is deliberate: other tests in this package query Prometheus too,
 // and one of them reads jetsam_demo_requests_total. Substring matching on
@@ -233,7 +233,7 @@ func TestQueryLogCapturesTheKnownQueries(t *testing.T) {
 
 	for _, q := range issuedQueries {
 		if !seen[q] {
-			t.Errorf("query log does not contain a read of %q -- did demo/query.sh run?", q)
+			t.Errorf("query log does not contain a read of %q -- did fixture/query.sh run?", q)
 		}
 	}
 	if ruleQueries == 0 {

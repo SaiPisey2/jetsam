@@ -11,11 +11,11 @@
 # Every poll below reads /api/v1/targets, /api/v1/series or
 # /api/v1/status/tsdb -- never /api/v1/query -- because Prometheus writes
 # every /api/v1/query (and /api/v1/query_range) call to the query log.
-# demo/query.sh is meant to be the only source of the log's httpRequest
-# entries (see its header comment and demo/VENDOR.md's query-log
+# fixture/query.sh is meant to be the only source of the log's httpRequest
+# entries (see its header comment and fixture/VENDOR.md's query-log
 # section); a gate that polls with count(...) queries would silently add
 # dozens of its own reads to that log, including reads of
-# instance:node_cpu_utilisation:rate5m, the one metric demo/verdict_test.go
+# instance:node_cpu_utilisation:rate5m, the one metric fixture/verdict_test.go
 # pins as read by nothing. /api/v1/series?match[]=<selector> reports
 # whether/how many series exist for a selector without executing PromQL,
 # so it never touches the log.
@@ -34,9 +34,9 @@ wait_for() {
   shift
   until "$@"; do
     if [ "$SECONDS" -ge "$DEADLINE" ]; then
-      echo "demo/ready.sh: timed out waiting for $what" >&2
+      echo "fixture/ready.sh: timed out waiting for $what" >&2
       if [ -n "${LAST_MISSING_RULE:-}" ]; then
-        echo "demo/ready.sh: recording rule producing no series: $LAST_MISSING_RULE" >&2
+        echo "fixture/ready.sh: recording rule producing no series: $LAST_MISSING_RULE" >&2
       fi
       exit 1
     fi
@@ -59,7 +59,7 @@ print(len(d))' 2>/dev/null
 }
 
 targets_up() {
-  # 3 is the number of scrape jobs demo/stack_test.go's wantJobs pins
+  # 3 is the number of scrape jobs fixture/stack_test.go's wantJobs pins
   # (prometheus-k8s, node-exporter, loadgen); that list is authoritative.
   [ "$(curl -s --max-time 5 "$PROM/api/v1/targets?state=active" |
     python3 -c 'import sys,json
@@ -71,7 +71,7 @@ print(sum(1 for x in t if x["health"] == "up"))' 2>/dev/null || echo 0)" = "3" ]
 }
 
 loadgen_scraped() {
-  # 400 is the exact series count demo/stack_test.go's
+  # 400 is the exact series count fixture/stack_test.go's
   # TestLoadgenExposesItsExactCardinality asserts against this same stack.
   [ "$(series_count 'jetsam_demo_requests_total')" = "400" ]
 }
@@ -91,15 +91,15 @@ while IFS= read -r name; do
 done < <(awk '/record:/ { sub(/.*record: */, ""); print }' "$HERE"/prometheus/rules/*.yaml | tr -d '"')
 
 if [ "${#RULE_NAMES[@]}" -eq 0 ]; then
-  echo "demo/ready.sh: extracted zero recording-rule names from $HERE/prometheus/rules/*.yaml -- extraction is broken, not confirming an empty stack" >&2
+  echo "fixture/ready.sh: extracted zero recording-rule names from $HERE/prometheus/rules/*.yaml -- extraction is broken, not confirming an empty stack" >&2
   exit 1
 fi
 
-# 15 is demo/vendor_test.go's wantRecording constant (see demo/VENDOR.md);
+# 15 is fixture/vendor_test.go's wantRecording constant (see fixture/VENDOR.md);
 # a change to the vendored rule count should fail here too, not only in
 # `go test -run TestVendored`.
 if [ "${#RULE_NAMES[@]}" -ne 15 ]; then
-  echo "demo/ready.sh: extracted ${#RULE_NAMES[@]} recording-rule names, want exactly 15 (demo/vendor_test.go's wantRecording)" >&2
+  echo "fixture/ready.sh: extracted ${#RULE_NAMES[@]} recording-rule names, want exactly 15 (fixture/vendor_test.go's wantRecording)" >&2
   exit 1
 fi
 
@@ -124,7 +124,7 @@ recording_rules_produce_series() {
 # The inventory comes from the TSDB status endpoint, not from a query, so
 # gate on that separately rather than assuming the two agree.
 #
-# instance:node_cpu_utilisation:rate5m is the metric demo/verdict_test.go
+# instance:node_cpu_utilisation:rate5m is the metric fixture/verdict_test.go
 # pins as written by a recording rule and read by nothing (the canary for
 # the Produced protection); keep this name in sync with that file.
 inventory_has_rule_output() {

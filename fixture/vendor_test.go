@@ -1,4 +1,4 @@
-package demo
+package fixture
 
 import (
 	"encoding/json"
@@ -11,7 +11,7 @@ import (
 )
 
 // Every count this fixture pins lives here. This is the only file in
-// package demo with no build tag, so the integration-tagged files
+// package fixture with no build tag, so the integration-tagged files
 // (stack_test.go, verdict_test.go) compile against these same constants.
 // The numbers used to be spelled out independently in four files, which
 // made VENDOR.md's bump procedure -- "update the counts here and in
@@ -87,7 +87,7 @@ func TestVendoredRulesParseAndMatchVendorDoc(t *testing.T) {
 			}
 			if len(rf.Groups) != want.groups || rules != want.rules || recording != want.recording {
 				t.Errorf("%s has %d groups / %d rules / %d recording, want %d / %d / %d -- "+
-					"upstream changed; re-run demo/vendor.sh and update demo/VENDOR.md deliberately",
+					"upstream changed; re-run fixture/vendor.sh and update fixture/VENDOR.md deliberately",
 					path, len(rf.Groups), rules, recording, want.groups, want.rules, want.recording)
 			}
 		})
@@ -150,7 +150,7 @@ func TestVendoredDashboardCarriesTheTemplateVariableHazard(t *testing.T) {
 
 	if len(exprs) != wantPanelQueries {
 		t.Errorf("dashboard has %d panel queries, want %d -- upstream revision changed; "+
-			"re-run demo/vendor.sh and update demo/VENDOR.md deliberately", len(exprs), wantPanelQueries)
+			"re-run fixture/vendor.sh and update fixture/VENDOR.md deliberately", len(exprs), wantPanelQueries)
 	}
 	withVars := 0
 	for _, e := range exprs {
@@ -172,7 +172,7 @@ func TestVendoredDashboardCarriesTheTemplateVariableHazard(t *testing.T) {
 	if parses != wantParsingQueries {
 		t.Errorf("%d of %d panel queries parse as PromQL with no substitution (%d fail), want %d / %d -- "+
 			"if this went UP the fixture has lost the hazard sub-project B's substitution layer exists for; "+
-			"re-run demo/vendor.sh and update demo/VENDOR.md deliberately",
+			"re-run fixture/vendor.sh and update fixture/VENDOR.md deliberately",
 			parses, len(exprs), len(exprs)-parses, wantParsingQueries, wantPanelQueries-wantParsingQueries)
 	}
 }

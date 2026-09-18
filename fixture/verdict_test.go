@@ -1,6 +1,6 @@
 //go:build integration
 
-package demo
+package fixture
 
 import (
 	"context"
@@ -130,7 +130,7 @@ func TestRecordingRuleOutputsAreProtected(t *testing.T) {
 	c := corpus.Build(rules, nil)
 
 	if len(c.Produced) != wantRecording {
-		t.Errorf("corpus recorded %d produced metrics, want %d (see demo/VENDOR.md)", len(c.Produced), wantRecording)
+		t.Errorf("corpus recorded %d produced metrics, want %d (see fixture/VENDOR.md)", len(c.Produced), wantRecording)
 	}
 	for _, want := range []string{
 		"instance:node_num_cpu:sum",
@@ -161,6 +161,6 @@ func TestTheCorpusBlocksNothing(t *testing.T) {
 		t.Errorf("corpus blocked %d queries, want 0: %v", len(c.Blocked), c.Blocked)
 	}
 	if c.Queries != wantRules {
-		t.Errorf("corpus read %d queries, want %d (see demo/VENDOR.md)", c.Queries, wantRules)
+		t.Errorf("corpus read %d queries, want %d (see fixture/VENDOR.md)", c.Queries, wantRules)
 	}
 }

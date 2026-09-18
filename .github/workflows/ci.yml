@@ -68,8 +68,8 @@ jobs:
       # The vendored fixtures are checked before anything is started: if
       # they no longer match what VENDOR.md records, every assertion
       # downstream is measuring something other than what it claims.
-      - run: go test ./demo/ -run TestVendored -count=1 -v
+      - run: go test ./fixture/ -run TestVendored -count=1 -v
       - run: make demo-up
       - run: make demo-test
       - if: failure()
-        run: docker compose -f demo/docker-compose.yml logs
+        run: docker compose -f fixture/docker-compose.yml logs

@@ -15,7 +15,7 @@ test:
 # with containers stuck in Created, which shows up as an indefinite wait
 # rather than a build error.
 #
-# demo/querylog is bind-mounted into the prometheus container so the host
+# fixture/querylog is bind-mounted into the prometheus container so the host
 # (and later, jetsam itself) can read the query log back out. It is
 # gitignored, so a fresh checkout does not have it, and Docker would create
 # it itself on first use -- owned by root, since dockerd runs as root --
@@ -25,28 +25,28 @@ test:
 # gitignored scratch directory in a local test fixture with nothing
 # sensitive in it; it is not a pattern to reuse anywhere that matters.
 demo-up:
-	mkdir -p demo/querylog
-	chmod 777 demo/querylog
-	$(COMPOSE) -f demo/docker-compose.yml build
-	$(COMPOSE) -f demo/docker-compose.yml up -d
-	$(COMPOSE) -f demo/docker-compose.yml ps
-	bash demo/grafana/token.sh
-	bash demo/ready.sh
-	bash demo/query.sh
+	mkdir -p fixture/querylog
+	chmod 777 fixture/querylog
+	$(COMPOSE) -f fixture/docker-compose.yml build
+	$(COMPOSE) -f fixture/docker-compose.yml up -d
+	$(COMPOSE) -f fixture/docker-compose.yml ps
+	bash fixture/grafana/token.sh
+	bash fixture/ready.sh
+	bash fixture/query.sh
 	@echo "prometheus http://localhost:9090"
 	@echo "grafana    http://localhost:3000"
 
 demo-down:
-	$(COMPOSE) -f demo/docker-compose.yml down -v
-	rm -f demo/querylog/queries.log demo/grafana/.token
+	$(COMPOSE) -f fixture/docker-compose.yml down -v
+	rm -f fixture/querylog/queries.log fixture/grafana/.token
 
 demo-logs:
-	$(COMPOSE) -f demo/docker-compose.yml logs -f
+	$(COMPOSE) -f fixture/docker-compose.yml logs -f
 
 demo-vendor:
-	bash demo/vendor.sh
+	bash fixture/vendor.sh
 
 # -count=1 is mandatory rather than decorative: without it the test cache
 # can return a PASS for a target that never touched the running stack.
 demo-test:
-	go test -tags=integration ./demo/... -count=1 -v
+	go test -tags=integration ./fixture/... -count=1 -v
