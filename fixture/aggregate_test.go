@@ -4,6 +4,7 @@ package fixture
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -179,12 +180,34 @@ func queryCount(t *testing.T, query string) int {
 // acceptance bullet: loadgenMetric collapses to (path), and the raw and
 // kept series counts the printed report states are numbers THIS TEST
 // measured independently against the live Prometheus, not constants baked
-// into the assertion. A hardcoded "400 series -> 5 kept" would go on
-// passing even if aggregate.Decide's own series accounting broke, as long
-// as jetsam and the test happened to agree on the same wrong number; a
-// measured "raw" and "kept" cannot agree with a wrong report for the wrong
-// reason, because nothing here tells them what to agree on. A metric name
-// or a series count deleted from writeFinding's headline line, or Decide
+// into the assertion.
+//
+// The two numbers are checked two different ways, and the difference is
+// deliberate, not an oversight:
+//
+//   - raw is compared AGAINST Decide's own p.RawSeries (never overwrites
+//     it) -- Decide sets RawSeries from the live TSDB status inventory
+//     (inv.Metrics[i].Series), and this measures the same quantity a
+//     second, independent way (count() over an instant query), so the two
+//     actually have to agree for this test to pass. p.RawSeries = raw
+//     here would make the comparison vacuous: the report would then be
+//     printing back this test's own number, and Decide's accounting could
+//     drift arbitrarily without this test ever noticing -- which is
+//     exactly the gap an earlier version of this test had.
+//   - kept has no such second source inside Decide to compare against:
+//     Proposal's own doc comment says KeptSeries is left at its zero value
+//     by Decide and MUST be filled in by the caller from a real count
+//     query, so p.KeptSeries = kept here is not a shortcut, it is the
+//     only place this value ever comes from. It goes through
+//     promapi.Client.CountSeriesBy -- the exact function cmd/jetsam's own
+//     aggregateCmd calls for this -- rather than a hand-built query, so a
+//     bug in that production measurement is exercised here too, not only
+//     reimplemented and independently agreed with.
+//
+// A hardcoded "400 series -> 5 kept" would go on passing even if
+// aggregate.Decide's own series accounting broke, as long as jetsam and
+// the test happened to agree on the same wrong number. A metric name or a
+// series count deleted from writeFinding's headline line, or Decide
 // silently changing which label loadgenMetric collapses to, would each
 // break the wantLine match below.
 func TestAggregateProposesLoadgenWithMeasuredNumbers(t *testing.T) {
@@ -199,7 +222,16 @@ func TestAggregateProposesLoadgenWithMeasuredNumbers(t *testing.T) {
 	}
 
 	raw := queryCount(t, "count("+selectorTagged(loadgenMetric)+")")
-	kept := queryCount(t, fmt.Sprintf("count(count by (%s) (%s))", strings.Join(p.Keep, ", "), selectorTagged(loadgenMetric)))
+	if p.RawSeries != raw {
+		t.Errorf("Decide reported %d raw series, the live Prometheus has %d", p.RawSeries, raw)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	kept, err := promapi.New(promURL, 30*time.Second).CountSeriesBy(ctx, loadgenMetric, p.Keep)
+	if err != nil {
+		t.Fatalf("CountSeriesBy: %v", err)
+	}
 	// This is the correctness floor emit/decide itself enforces (see
 	// cmd/jetsam's withholdReason): a proposal that does not actually
 	// reduce the series count is not a real proposal at all. Asserting it
@@ -208,7 +240,6 @@ func TestAggregateProposesLoadgenWithMeasuredNumbers(t *testing.T) {
 	if kept >= raw {
 		t.Fatalf("measured kept series (%d) is not fewer than raw series (%d) -- this fixture no longer demonstrates a real reduction", kept, raw)
 	}
-	p.RawSeries = raw
 	p.KeptSeries = kept
 
 	ruleYAML, err := emit.RenderRule("", p)
@@ -561,14 +592,20 @@ const equivalenceRulePath = "prometheus/rules/equivalence-check.yaml"
 // the rule's own evaluation read, so the two values should agree to within
 // floating-point/string round-tripping, not "close enough given staleness."
 //
-// Tolerance: 0.1% relative, to absorb exactly that round-tripping (a
-// recorded sample is a float64 written once; the query result is the same
-// computation re-run and then formatted back through Prometheus's own
-// %v-style float encoding in its JSON API) and nothing else. It is still
-// wide enough to say nothing useful passed by accident: a swapped operator,
-// a dropped label, half the series missing from the aggregation, or a
-// materially wrong window would each move a path's value by many multiples
-// of 0.1%, not less.
+// Tolerance: 0.1% relative. The measured residual, observed on the order
+// of 1e-5 to 1e-4, is one-sided across every run this test has produced:
+// the recorded value is always slightly BELOW the independently-queried
+// one, never above. The direction is the tell that this is not JSON float
+// round-tripping (which would be symmetric and many orders of magnitude
+// smaller, ~1e-15) but a real, one-directional race instead: a scrape
+// sample timestamped at or before the rule's own evaluation instant can
+// still be INGESTED a moment after that evaluation ran, so a query issued
+// afterward sees one more sample in its range than the rule itself did.
+// 0.1% comfortably clears that residual while still being narrow enough to
+// say nothing useful passed by accident: a swapped operator, a dropped
+// label, half the series missing from the aggregation, or a materially
+// wrong window would each move a path's value by many multiples of 0.1%,
+// not less.
 //
 // Mutation-checked: temporarily hardcoding renderExpr's outer operator to
 // "min" regardless of p.Op (internal/emit/record.go) makes this test fail
@@ -608,6 +645,19 @@ func TestAggregateRuleEquivalesTheOriginalAcrossTheRuleBoundary(t *testing.T) {
 			t.Errorf("prometheus did not return to its pre-test rule count after cleanup: %d groups / %d rules, want %d / %d",
 				afterGroups, afterRules, beforeGroups, beforeRules)
 		}
+		// This removes the RULE, not the SERIES it already wrote: the
+		// recording rule stops evaluating the moment the file is gone and
+		// Prometheus reloads, but path:jetsam_demo_requests_total:sum_rate5m
+		// stays in the TSDB, queryable, until the retention window rolls
+		// it off -- a plain Prometheus has no "delete this series" short
+		// of --web.enable-admin-api and the admin delete-series endpoint,
+		// a bigger hammer than a scratch rule from one test run justifies.
+		// Nothing in this suite is sensitive to it today, but it is a
+		// phantom metric in front of any `jetsam scan` run against this
+		// stack afterward, and it is why the fixture's total distinct
+		// metric name count is no longer knowable purely from its
+		// committed rule/dashboard/loadgen sources once this test has
+		// run -- see VENDOR.md's note on this exact rule name.
 	})
 
 	promReload(t)
@@ -653,7 +703,7 @@ func TestAggregateRuleEquivalesTheOriginalAcrossTheRuleBoundary(t *testing.T) {
 			continue
 		}
 		if rel := diff / math.Abs(want); rel > relTolerance {
-			t.Errorf("path %q: recorded %.4f, original %.4f, differ by %.2f%%, want within %.0f%%",
+			t.Errorf("path %q: recorded %.4f, original %.4f, differ by %.2f%%, want within %.1f%%",
 				path, got, want, 100*rel, 100*relTolerance)
 		}
 	}

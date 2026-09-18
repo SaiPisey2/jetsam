@@ -1,11 +1,11 @@
 services:
   loadgen:
     build: ./loadgen
-    ports: ["8081:8081"]
+    ports: ["127.0.0.1:8081:8081"]
 
   node-exporter:
     image: prom/node-exporter:v1.10.0@sha256:dbb30baa213b9a8c9aff7fe00c124ec371752c92215f014ec6f26159e9c55ff3
-    ports: ["9100:9100"]
+    ports: ["127.0.0.1:9100:9100"]
 
   prometheus:
     image: prom/prometheus:v3.13.0@sha256:c6b27ea434f8389bfe233fbc7be381cf50587c286e871bc842008f5a1b1908a7
@@ -21,14 +21,23 @@ services:
       # writes a rendered recording rule into a file this stack already
       # globs, reloads to make Prometheus actually evaluate it, and reloads
       # again after removing the file -- there is no other way to get a
-      # rule in front of a running Prometheus without restarting it.
+      # rule in front of a running Prometheus without restarting it. This
+      # widens what was previously a read-only port to also accept a
+      # config/rule reload from anyone who can reach it, which is exactly
+      # why every port below is now bound to 127.0.0.1 rather than every
+      # interface -- see that binding's own comment.
       - --web.enable-lifecycle
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/rules:/etc/prometheus/rules:ro
       - ./querylog:/querylog
       - promdata:/prometheus
-    ports: ["9090:9090"]
+    # Bound to loopback, not every interface: an unauthenticated Prometheus
+    # with --web.enable-lifecycle accepts POST /-/reload from whoever can
+    # reach it, and this stack has no other access control in front of it.
+    # jetsam, the test suite and every fixture script already reach this
+    # over "localhost", so binding here changes nothing they do.
+    ports: ["127.0.0.1:9090:9090"]
     depends_on: [loadgen, node-exporter]
 
   grafana:
@@ -36,13 +45,14 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
-      # Nothing here is reachable from outside the host, and the stack is
-      # torn down with `make demo-down`. Do not copy this anywhere real.
+      # This admin/admin credential is only survivable because the port
+      # below is bound to loopback and the stack is torn down with
+      # `make demo-down`. Do not copy this anywhere real.
       GF_AUTH_ANONYMOUS_ENABLED: "false"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-    ports: ["3000:3000"]
+    ports: ["127.0.0.1:3000:3000"]
     depends_on: [prometheus]
 
 volumes:

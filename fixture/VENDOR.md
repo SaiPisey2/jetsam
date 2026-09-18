@@ -88,6 +88,28 @@ would ask jetsam to name a rule computing exactly what it already computes
 the rewriter to replace only the aggregate subtree it recognises and leave
 the surrounding `> 100` standing; see `fixture/aggregate_test.go`.
 
+### A phantom metric this fixture's own test suite leaves behind
+
+`fixture/aggregate_test.go`'s equivalence check writes a real recording
+rule, `path:jetsam_demo_requests_total:sum_rate5m`, into a scratch file
+Prometheus loads, reloads, lets it evaluate, and then deletes the file
+and reloads again. That correctly stops the RULE — `/api/v1/rules`
+returns to exactly its pre-test count, checked every run — but it does
+not, and cannot cheaply, delete the SERIES the rule already wrote. A
+plain Prometheus has no way to remove a series short of
+`--web.enable-admin-api` and its delete-series endpoint, which is more
+surface area than a scratch rule from one test run justifies enabling on
+this stack. So after this test has run once, `path:jetsam_demo_requests_total:sum_rate5m`
+stays queryable in the TSDB until the retention window rolls it off:
+the fixture's total distinct `__name__` count is one higher than its
+committed rules/dashboard/loadgen sources alone would produce, and a
+`jetsam scan` run against this stack afterward sees one metric — a
+recording-rule output, correctly `Produced` and never proposed for a
+drop — that nothing in the committed fixture named. Nothing in this
+suite is sensitive to it today; anyone adding an assertion that counts
+metric names exactly, or names every recording-rule output, should know
+it can be there.
+
 ## Grafana dashboard
 
 Source: https://grafana.com/api/dashboards/1860 — "Node Exporter Full"
