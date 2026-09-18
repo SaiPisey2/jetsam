@@ -966,7 +966,7 @@ const aggregateQueryMaxBytes = 64 << 20
 // "by ()", which collapses every series to one -- correct for a consumer
 // that aggregates the metric down to a single number.
 //
-// querylog.IgnoreUsageLabel marks this query as jetsam's own tooling, not
+// promapi.IgnoreUsageLabel marks this query as jetsam's own tooling, not
 // real usage, for the same reason promapi.QueryJobsFor's own query carries
 // it: Prometheus logs every /api/v1/query call, and without the marker
 // running `aggregate` once would make every metric it measured look, on
@@ -978,7 +978,7 @@ func measureKeptSeries(ctx context.Context, baseURL string, hc *http.Client, met
 	if len(keep) > 0 {
 		by = "(" + strings.Join(keep, ", ") + ")"
 	}
-	query := fmt.Sprintf(`count(count by %s ({__name__=%q, %s=""}))`, by, metric, querylog.IgnoreUsageLabel)
+	query := fmt.Sprintf(`count(count by %s ({__name__=%q, %s=""}))`, by, metric, promapi.IgnoreUsageLabel)
 
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/query?" + (url.Values{"query": {query}}).Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)

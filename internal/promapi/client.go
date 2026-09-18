@@ -13,9 +13,37 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/SaiPisey2/jetsam/internal/querylog"
 )
+
+// IgnoreUsageLabel is the label name Prometheus tooling attaches to a query
+// to mark it as tooling rather than real usage: mimirtool's own analysis
+// commands, among others, issue every probe as
+// `{__name__="m", __ignore_usage__=""}` for exactly this reason. The
+// matcher is semantically inert -- an empty-value equality matcher on a
+// label nothing legitimately carries matches every series that lacks the
+// label, which is every series there is, so no query's RESULT changes by
+// carrying it (verified against a live Prometheus: both forms of both
+// QueryJobsFor's and cmd/jetsam's own measurement query returned identical
+// results).
+//
+// It lives here, not in internal/querylog, because the label is part of
+// how jetsam CONSTRUCTS the queries it issues -- QueryJobsFor's own
+// job-membership probe below, and cmd/jetsam's aggregate measurement query
+// -- and a log reader recognising it is downstream of that, not the other
+// way around: internal/querylog imports this constant from here rather
+// than the reverse, so the HTTP client that builds queries does not depend
+// on the log parser that reads them back.
+//
+// jetsam is exactly the kind of tool this convention exists for, in both
+// directions: internal/querylog.Read excludes any logged query carrying
+// this label from the corpus, and jetsam's own queries that would
+// otherwise be logged back into the very file it reads carry it
+// themselves. Without the second half, a metric `aggregate` measures
+// today is read by a `count` consumer in tomorrow's query log, and running
+// the tool is what stops the tool working -- the same shape as
+// fixture/ready.sh polling the fixture's OWN query log via /api/v1/series
+// rather than /api/v1/query, for the identical reason.
+const IgnoreUsageLabel = "__ignore_usage__"
 
 // maxResponseBytes bounds every response body jetsam decodes. A legitimate
 // TSDB status or rules response from even a very large Prometheus is
@@ -254,13 +282,13 @@ func (c *Client) QueryJobsFor(ctx context.Context, metric string) ([]string, err
 			Metric map[string]string `json:"metric"`
 		} `json:"result"`
 	}
-	// querylog.IgnoreUsageLabel marks this as jetsam's own tooling query,
-	// not real usage: Prometheus writes every /api/v1/query call to its
-	// query log the same way it writes a human's or a dashboard's, and
-	// without this marker THIS query -- run again on a later scan -- would
-	// itself show up as a logged read of metric. The matcher is inert: see
-	// the constant's own doc comment for why no result changes.
-	q := url.Values{"query": []string{fmt.Sprintf(`count by (job) ({__name__=%q, %s=""})`, metric, querylog.IgnoreUsageLabel)}}
+	// IgnoreUsageLabel marks this as jetsam's own tooling query, not real
+	// usage: Prometheus writes every /api/v1/query call to its query log
+	// the same way it writes a human's or a dashboard's, and without this
+	// marker THIS query -- run again on a later scan -- would itself show
+	// up as a logged read of metric. The matcher is inert: see the
+	// constant's own doc comment for why no result changes.
+	q := url.Values{"query": []string{fmt.Sprintf(`count by (job) ({__name__=%q, %s=""})`, metric, IgnoreUsageLabel)}}
 	if err := c.get(ctx, "/api/v1/query", q, &data); err != nil {
 		return nil, err
 	}

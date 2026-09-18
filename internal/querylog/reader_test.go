@@ -351,8 +351,9 @@ func TestReadingReportsTheEndOfItsCoverage(t *testing.T) {
 // TestReadSkipsAQueryCarryingTheIgnoreUsageMarker pins half of the fix for
 // jetsam poisoning its own evidence: mimirtool (and jetsam's own
 // promapi.QueryJobsFor and cmd/jetsam's aggregate measurement query) tag a
-// tooling query with IgnoreUsageLabel specifically so usage analysis skips
-// it. A query carrying that label must contribute nothing to the corpus.
+// tooling query with promapi.IgnoreUsageLabel specifically so usage
+// analysis skips it. A query carrying that label must contribute nothing
+// to the corpus.
 func TestReadSkipsAQueryCarryingTheIgnoreUsageMarker(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "queries.log",

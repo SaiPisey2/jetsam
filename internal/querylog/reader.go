@@ -19,37 +19,16 @@ import (
 	"sort"
 	"strings"
 	"time"
-)
 
-// IgnoreUsageLabel is the label name Prometheus tooling attaches to a query
-// to mark it as tooling rather than real usage: mimirtool's own analysis
-// commands, among others, issue every probe as
-// `{__name__="m", __ignore_usage__=""}` for exactly this reason. The
-// matcher is semantically inert -- an empty-value equality matcher on a
-// label nothing legitimately carries matches every series that lacks the
-// label, which is every series there is, so no query's RESULT changes by
-// carrying it (verified against a live Prometheus: both forms of both
-// promapi.QueryJobsFor's and cmd/jetsam's own measurement query returned
-// identical results).
-//
-// jetsam is exactly the kind of tool this convention exists for, in both
-// directions: Read excludes any logged query carrying this label from the
-// corpus (see readFile), and jetsam's own queries that would otherwise be
-// logged back into the very file it reads -- promapi.QueryJobsFor's
-// job-membership probe, and cmd/jetsam's aggregate measurement query --
-// carry it themselves. Without the second half, a metric `aggregate`
-// measures today is read by a `count` consumer in tomorrow's query log, and
-// running the tool is what stops the tool working -- the same shape as
-// fixture/ready.sh polling the fixture's OWN query log via /api/v1/series
-// rather than /api/v1/query, for the identical reason.
-const IgnoreUsageLabel = "__ignore_usage__"
+	"github.com/SaiPisey2/jetsam/internal/promapi"
+)
 
 // Reading is what one pass over the log found.
 type Reading struct {
 	// Queries is every distinct query string a human or a dashboard ran,
 	// sorted. Rule evaluations are excluded -- see Read -- and so is any
-	// query carrying IgnoreUsageLabel, tooling's own signal that it is not
-	// real usage.
+	// query carrying promapi.IgnoreUsageLabel, tooling's own signal that
+	// it is not real usage.
 	Queries []string
 	// Span is the time between the log's earliest and latest entry, of
 	// EITHER kind, across every matched file. It is the log's coverage --
@@ -274,12 +253,13 @@ func readFile(path string, seen map[string]bool) (entries int, earliest, latest 
 		if q == "" {
 			continue
 		}
-		// A query carrying IgnoreUsageLabel is tooling signalling itself
-		// as not-real-usage, not a human or dashboard read -- see the
-		// constant's own doc comment for why this must be checked here,
-		// not left to whoever calls Read: a caller cannot un-fold a query
-		// this package already handed it as evidence.
-		if strings.Contains(q, IgnoreUsageLabel) {
+		// A query carrying promapi.IgnoreUsageLabel is tooling signalling
+		// itself as not-real-usage, not a human or dashboard read -- see
+		// that constant's own doc comment for why the label lives with
+		// the queries jetsam CONSTRUCTS rather than here, and why this
+		// must be checked at read time regardless: a caller cannot
+		// un-fold a query this package already handed it as evidence.
+		if strings.Contains(q, promapi.IgnoreUsageLabel) {
 			continue
 		}
 		seen[q] = true
