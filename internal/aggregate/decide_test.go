@@ -257,11 +257,6 @@ func TestARecordingRuleOutputIsNeverProposedForAggregation(t *testing.T) {
 	}
 }
 
-// AllOpsSafe already rules this out for anything corpus.Build produces
-// today, but this package does not get to assume that invariant holds
-// forever in a package it does not own -- so a MetricNeed whose one
-// operator is not sum, min or max must refuse even when AllOpsSafe claims
-// otherwise.
 // The counter-reset defect this task exists for: summing a counter and
 // rating the sum is not the same as summing the rates, so what gets
 // recorded and named must be the rate, not the metric.
@@ -340,6 +335,11 @@ func TestInstantAndRateMixIsRefused(t *testing.T) {
 	}
 }
 
+// AllOpsSafe already rules this out for anything corpus.Build produces
+// today, but this package does not get to assume that invariant holds
+// forever in a package it does not own -- so a MetricNeed whose one
+// operator is not sum, min or max must refuse even when AllOpsSafe claims
+// otherwise.
 func TestAnOperatorOutsideTheKnownSetIsRefused(t *testing.T) {
 	c := corpus.Corpus{
 		Used:  map[string]bool{"m_total": true},

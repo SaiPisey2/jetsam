@@ -21,11 +21,19 @@ import (
 // Proposal is a metric Decide judged safe to collapse to its Keep labels
 // under Op.
 type Proposal struct {
-	Metric    string
-	Keep      []string // labels that survive, sorted
-	Op        string   // "sum", "min" or "max"
-	Fn        string   // "rate", "irate", "increase", or "" for the metric itself
-	Window    string   // the range, e.g. "5m"; empty when Fn is
+	Metric string
+	Keep   []string // labels that survive, sorted
+	Op     string   // "sum", "min" or "max"
+	// Fn is "rate", "irate", "increase", or "" for the metric itself, and
+	// Window is its range (e.g. "5m"), empty when Fn is. When Fn is set,
+	// the rule records the RATE, not the counter: summing a counter across
+	// series and rating the sum afterward is not the same number as summing
+	// the rates directly, because the sum drops whenever one series resets
+	// or disappears, and rate reads that drop as a counter reset of its
+	// own. The person approving this collapse is trusting that the rule
+	// named here is the rate, so it stays correct across a pod restart.
+	Fn        string
+	Window    string
 	RawSeries int
 	// KeptSeries is left at its zero value here: this package has no label
 	// list to run a `count by (...)` query against, only a name and a
