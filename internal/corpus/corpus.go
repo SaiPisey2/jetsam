@@ -5,6 +5,7 @@ package corpus
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -93,6 +94,16 @@ type Corpus struct {
 	// read?" should not have to know about sources -- but a caller writing
 	// the sentence a human approves a deletion against must.
 	UsedBy map[string]Source
+	// Needs is what the corpus as a whole requires of each metric's labels,
+	// the union of every consumer that touches it. A metric gets an entry
+	// here for exactly the same reason it gets one in Used: some query
+	// touches it. A MISSING key means "nothing in the corpus touches this
+	// metric" -- it never means "this metric needs nothing". That distinction
+	// matters because the zero MetricNeed, {All: false, Required: nil}, reads
+	// exactly like "needs no labels, safe to aggregate away entirely," so a
+	// caller must look the metric up in Used (or Needs itself) before ever
+	// treating a missing entry as permission to collapse anything.
+	Needs map[string]MetricNeed
 	// Produced is every metric a recording rule writes. v0.1 never
 	// proposes dropping one: that would mean editing a rule file, not a
 	// scrape config.
@@ -262,6 +273,113 @@ func (c *Corpus) markUsed(metric string, src Source) {
 	c.UsedBy[metric] |= src
 }
 
+// MetricNeed is what the whole corpus requires of one metric: the union of
+// every consumer's requirements. Aggregation is possible only when this says
+// so, and it says so only when every consumer agrees.
+type MetricNeed struct {
+	All        bool     // some query needs every label
+	Required   []string // sorted union across every query, when All is false
+	Ops        []string // sorted distinct operators seen, for the report
+	AllOpsSafe bool     // every operator seen composes
+	Blockers   []string // human-readable reasons aggregation is impossible
+}
+
+// needAccumulator folds one query's LabelNeed into a metric's running union.
+type needAccumulator struct {
+	all      bool
+	required map[string]bool
+	ops      map[string]bool
+	opsSafe  bool
+	blockers []string
+}
+
+// ensureAccumulator returns the running union for metric, creating it on
+// first touch. opsSafe starts true so that ANDing in each query's OpSafe
+// only ever turns it false -- an accumulator nothing has spoken against yet
+// must not look like one an unsafe operator has already condemned.
+func ensureAccumulator(needs map[string]*needAccumulator, metric string) *needAccumulator {
+	acc := needs[metric]
+	if acc == nil {
+		acc = &needAccumulator{required: map[string]bool{}, ops: map[string]bool{}, opsSafe: true}
+		needs[metric] = acc
+	}
+	return acc
+}
+
+// foldUnreadable records that a query jetsam could not parse might touch
+// metric. It is folded as All -- the same refusal LabelsNeeded itself
+// defaults to on any doubt -- because a query this unreadable might need any
+// label at all, and under-claiming here is exactly the mistake this file
+// exists to prevent.
+func foldUnreadable(needs map[string]*needAccumulator, metric, query string) {
+	acc := ensureAccumulator(needs, metric)
+	acc.all = true
+	acc.blockers = append(acc.blockers, fmt.Sprintf("could not parse a query that may touch it: %s", query))
+}
+
+// foldNeeds folds one query's requirement for each of its metrics into the
+// corpus-wide union. metrics is the set that query is already known to
+// touch -- calling LabelsNeeded for every metric in the corpus instead would
+// plant an entry for metrics this query never mentions, since LabelsNeeded
+// silently returns the zero LabelNeed for a metric a query does not touch,
+// and a zero LabelNeed is indistinguishable from "needs nothing."
+//
+// A query's own re-parse failing here, despite Extract having already
+// succeeded on the same text, should not happen -- but this file does not
+// get to assume its own parser agrees with itself forever, so it is folded
+// the same conservative way as any other unreadable query rather than
+// ignored.
+func foldNeeds(needs map[string]*needAccumulator, query string, metrics []string) {
+	for _, m := range metrics {
+		need, err := LabelsNeeded(query, m)
+		if err != nil {
+			foldUnreadable(needs, m, query)
+			continue
+		}
+		acc := ensureAccumulator(needs, m)
+		if need.All {
+			acc.all = true
+		}
+		for _, r := range need.Required {
+			acc.required[r] = true
+		}
+		if need.Op != "" {
+			acc.ops[need.Op] = true
+			if !need.OpSafe {
+				acc.opsSafe = false
+			}
+		}
+	}
+}
+
+// needsToCorpus converts the running per-metric unions into the sorted,
+// read-only form Corpus exposes. Required is left nil when All is true,
+// matching LabelsNeeded's own contract that Required is meaningful only
+// when All is false -- a caller must never read Required as a bound on a
+// metric this map already says needs everything.
+func needsToCorpus(needs map[string]*needAccumulator) map[string]MetricNeed {
+	out := make(map[string]MetricNeed, len(needs))
+	for m, acc := range needs {
+		n := MetricNeed{
+			All:        acc.all,
+			AllOpsSafe: acc.opsSafe,
+			Blockers:   acc.blockers,
+		}
+		if !acc.all {
+			for r := range acc.required {
+				n.Required = append(n.Required, r)
+			}
+			sort.Strings(n.Required)
+		}
+		for op := range acc.ops {
+			n.Ops = append(n.Ops, op)
+		}
+		sort.Strings(n.Ops)
+		out[m] = n
+	}
+	return out
+}
+
 // readQueries reads a batch of queries from one source.
 //
 // A query that will not parse even after substitution is CONTAINED, not
@@ -272,22 +390,32 @@ func (c *Corpus) markUsed(metric string, src Source) {
 // under-protects, and describe(q, err) names it in unparsed so the failure
 // is reported rather than swallowed.
 func (c *Corpus) readQueries(qs []string, src Source, known map[string]bool, allMetrics []string,
-	describe func(q string, err error) string, unparsed *[]string) {
+	describe func(q string, err error) string, unparsed *[]string, needs map[string]*needAccumulator) {
 	for _, q := range qs {
 		c.Queries++
-		refs, err := Extract(Substitute(q))
+		sub := Substitute(q)
+		refs, err := Extract(sub)
 		if err != nil {
 			*unparsed = append(*unparsed, describe(q, err))
 			for _, tok := range metricToken.FindAllString(q, -1) {
 				if known[tok] {
 					c.markUsed(tok, src)
+					// jetsam cannot read this query at all, so it might need
+					// any label of any metric it merely mentions.
+					foldUnreadable(needs, tok, q)
 				}
 			}
 			continue
 		}
-		for _, m := range refs.Resolve(allMetrics) {
+		metrics := refs.Resolve(allMetrics)
+		for _, m := range metrics {
 			c.markUsed(m, src)
 		}
+		// The SUBSTITUTED text is what Extract actually analysed -- folding
+		// the raw q here would ask LabelsNeeded to re-derive labels from
+		// $variables that were never resolved, and get a different, wrong
+		// answer than the one Extract's refs are based on.
+		foldNeeds(needs, sub, metrics)
 	}
 }
 
@@ -319,6 +447,15 @@ func Build(src Sources, allMetrics []string) Corpus {
 		LogUnreadable:        src.QueryLogUnreadable,
 	}
 
+	known := make(map[string]bool, len(allMetrics))
+	for _, m := range allMetrics {
+		known[m] = true
+	}
+
+	// needs accumulates the corpus-wide union as every source is read below,
+	// and is converted to c.Needs once at the end -- see needsToCorpus.
+	needs := map[string]*needAccumulator{}
+
 	for _, r := range src.Rules {
 		c.Queries++
 		// What a recording rule WRITES comes from the rules API independently
@@ -330,16 +467,23 @@ func Build(src Sources, allMetrics []string) Corpus {
 		refs, err := Extract(r.Query)
 		if err != nil {
 			c.Blocked = append(c.Blocked, fmt.Sprintf("rule %s/%s: %v", r.Group, r.Name, err))
+			// An unparseable rule already forbids every drop by way of
+			// Blocked -- but Needs must not depend on a reader following
+			// that distant gate before trusting it, so the same metric-token
+			// fallback readQueries uses for a contained failure applies here
+			// too, purely for Needs' own consistency.
+			for _, tok := range metricToken.FindAllString(r.Query, -1) {
+				if known[tok] {
+					foldUnreadable(needs, tok, r.Query)
+				}
+			}
 			continue
 		}
-		for _, m := range refs.Resolve(allMetrics) {
+		metrics := refs.Resolve(allMetrics)
+		for _, m := range metrics {
 			c.markUsed(m, FromRule)
 		}
-	}
-
-	known := make(map[string]bool, len(allMetrics))
-	for _, m := range allMetrics {
-		known[m] = true
+		foldNeeds(needs, r.Query, metrics)
 	}
 
 	for _, d := range src.Dashboards {
@@ -347,7 +491,7 @@ func Build(src Sources, allMetrics []string) Corpus {
 		c.readQueries(d.Queries, FromDashboard, known, allMetrics,
 			func(q string, err error) string {
 				return fmt.Sprintf("dashboard %s (%s): %v", title, uid, err)
-			}, &c.DashboardPanelsUnparsed)
+			}, &c.DashboardPanelsUnparsed, needs)
 
 		// A dashboard reads metrics through its template-variable
 		// definitions too -- typically label_values(metric, label), which
@@ -360,7 +504,7 @@ func Build(src Sources, allMetrics []string) Corpus {
 		c.readQueries(d.VariableQueries, FromDashboard, known, allMetrics,
 			func(q string, err error) string {
 				return fmt.Sprintf("dashboard %s (%s): variable %s", title, uid, q)
-			}, &c.DashboardVariablesUnparsed)
+			}, &c.DashboardVariablesUnparsed, needs)
 	}
 
 	if src.QueryLog != nil {
@@ -371,7 +515,9 @@ func Build(src Sources, allMetrics []string) Corpus {
 		c.readQueries(src.QueryLog.Queries, FromLog, known, allMetrics,
 			func(q string, err error) string {
 				return fmt.Sprintf("query log: %v", err)
-			}, &c.QueryLogUnparsed)
+			}, &c.QueryLogUnparsed, needs)
 	}
+
+	c.Needs = needsToCorpus(needs)
 	return c
 }

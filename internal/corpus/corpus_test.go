@@ -1,6 +1,7 @@
 package corpus
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -376,5 +377,78 @@ func TestFormatSpanStaysReadableAtEveryScale(t *testing.T) {
 		if got := FormatSpan(tc.d); got != tc.want {
 			t.Errorf("FormatSpan(%s) = %q, want %q", tc.d, got, tc.want)
 		}
+	}
+}
+
+func TestNeedsUnionsAcrossEveryConsumer(t *testing.T) {
+	c := Build(Sources{
+		Rules: []promapi.Rule{
+			{Name: "a", Group: "g", Type: "recording", Query: `sum by (path) (m_total)`},
+			{Name: "b", Group: "g", Type: "recording", Query: `sum by (status) (m_total)`},
+		},
+	}, []string{"m_total"})
+
+	n := c.Needs["m_total"]
+	if n.All {
+		t.Fatalf("All = true, want false -- both consumers aggregate")
+	}
+	if got, want := n.Required, []string{"path", "status"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Required = %v, want %v -- the union, not one consumer's view", got, want)
+	}
+	if !n.AllOpsSafe {
+		t.Error("AllOpsSafe = false, want true -- both are sum")
+	}
+}
+
+// One bare selector anywhere makes aggregation impossible, however many other
+// consumers aggregate neatly.
+func TestOneBareSelectorPoisonsTheUnion(t *testing.T) {
+	c := Build(Sources{
+		Rules: []promapi.Rule{
+			{Name: "a", Group: "g", Type: "recording", Query: `sum by (path) (m_total)`},
+			{Name: "b", Group: "g", Type: "alerting", Query: `m_total > 5`},
+		},
+	}, []string{"m_total"})
+
+	if !c.Needs["m_total"].All {
+		t.Error("All = false, want true -- an unaggregated selector returns every label")
+	}
+}
+
+func TestDisagreeingOperatorsAreRecorded(t *testing.T) {
+	c := Build(Sources{
+		Rules: []promapi.Rule{
+			{Name: "a", Group: "g", Type: "recording", Query: `sum by (path) (m_total)`},
+			{Name: "b", Group: "g", Type: "recording", Query: `max by (path) (m_total)`},
+		},
+	}, []string{"m_total"})
+
+	n := c.Needs["m_total"]
+	if got, want := n.Ops, []string{"max", "sum"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Ops = %v, want %v", got, want)
+	}
+}
+
+func TestANonComposingOperatorIsRecorded(t *testing.T) {
+	c := Build(Sources{
+		Rules: []promapi.Rule{
+			{Name: "a", Group: "g", Type: "recording", Query: `avg by (path) (m_total)`},
+		},
+	}, []string{"m_total"})
+
+	if c.Needs["m_total"].AllOpsSafe {
+		t.Error("AllOpsSafe = true, want false -- avg does not compose")
+	}
+}
+
+// Dashboards and logged queries contribute requirements exactly as rules do.
+func TestDashboardsAndLoggedQueriesContributeRequirements(t *testing.T) {
+	c := Build(Sources{
+		Dashboards: []grafana.Dashboard{{UID: "d", Title: "D", Queries: []string{`sum by (path) (m_total)`}}},
+		QueryLog:   &querylog.Reading{Queries: []string{`sum by (pod) (m_total)`}, Span: time.Hour},
+	}, []string{"m_total"})
+
+	if got, want := c.Needs["m_total"].Required, []string{"path", "pod"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Required = %v, want %v", got, want)
 	}
 }
