@@ -4,18 +4,13 @@ package fixture
 
 import (
 	"encoding/json"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
-	"github.com/SaiPisey2/jetsam/internal/grafana"
 )
 
 // TestMimirtoolAgreesDashboardsAreUsed is a differential oracle: an
@@ -106,51 +101,28 @@ func TestMimirtoolAgreesDashboardsAreUsed(t *testing.T) {
 	inv, src := liveSources(t)
 	dashOnly := corpus.Build(corpus.Sources{Dashboards: src.Dashboards}, metricNames(inv))
 
-	// templateOnly names metrics mentioned only in a dashboard's own
-	// template-variable definitions (Grafana's "job"/"nodename"/"instance"
-	// dropdowns, typically a label_values(metric, label) query), never in
-	// any panel's target expr. This is a real, narrow, documented gap in
-	// internal/grafana: Client.Dashboards collects panel target queries
-	// only -- see its Dashboard type's doc comment, "the queries its
-	// panels run" -- by design from the task that built it, not an
-	// oversight introduced here. Grafana genuinely issues a
-	// template-variable query to Prometheus each time the dashboard loads,
-	// so a metric named only there is a real read jetsam's Dashboards
-	// source does not see; jetsam's PRODUCTION verdict still catches it
-	// through the query log in the fixture (confirmed:
-	// TestKnownArchetypesGradeCorrectly and the isolation tests above all
-	// use the full corpus, where this metric is not at issue). Fixing
-	// internal/grafana to also scan template variables is a production
-	// change outside this test's remit; it is named here, logged rather
-	// than silently absorbed, and excluded from the hard failure below
-	// because it is not the failure this test exists to catch -- a broken
-	// dashboard fetch.
-	known := make(map[string]bool, len(inv.Metrics))
-	for _, m := range inv.Metrics {
-		known[m.Name] = true
-	}
-	templateOnly := templateVariableMetrics(t, src.Dashboards, dashOnly, known)
-
 	// The assertion is one-directional. jetsam closes transitively over
 	// substitution and Extract's own resolution even within the dashboard
 	// source alone, so an exact match is not expected either way; the
 	// failure that means something is mimirtool finding a dashboard read
-	// that jetsam's dashboard corpus missed for a reason OTHER than the
-	// documented template-variable gap above.
-	var missing, knownGap []string
+	// that jetsam's dashboard corpus missed entirely.
+	//
+	// This used to carry a named exception here for metrics referenced
+	// only by a dashboard's template-variable definitions (label_values(),
+	// backing a "job"/"nodename"/"instance" dropdown) -- internal/grafana
+	// only scanned panel queries, and node_uname_info, read solely by the
+	// vendored dashboard's own variables, was missing from jetsam's
+	// dashboard-only set as a result. That gap is now closed:
+	// grafana.Dashboard carries VariableQueries alongside Queries, and
+	// corpus.Build resolves them the same way it resolves an unparseable
+	// panel. mimirtool and jetsam now agree on the dashboard-only set with
+	// no exception needed; if a real disagreement reappears, it belongs in
+	// this failure, not behind a new allowance.
+	var missing []string
 	for m := range mimirUsed {
-		if dashOnly.Used[m] {
-			continue
+		if !dashOnly.Used[m] {
+			missing = append(missing, m)
 		}
-		if templateOnly[m] {
-			knownGap = append(knownGap, m)
-			continue
-		}
-		missing = append(missing, m)
-	}
-	if len(knownGap) > 0 {
-		sort.Strings(knownGap)
-		t.Logf("mimirtool found %d metric(s) named only in a dashboard template variable, which internal/grafana does not scan by design (known gap, not a test failure): %v", len(knownGap), knownGap)
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
@@ -170,60 +142,6 @@ func TestMimirtoolAgreesDashboardsAreUsed(t *testing.T) {
 	}
 	t.Logf("mimirtool: %d metrics used by dashboards; jetsam (dashboards only): %d metrics used; %d of jetsam's are not in mimirtool's set (first %d shown): %v",
 		len(mimirUsed), len(dashOnly.Used), len(jetsamOnly), len(shown), shown)
-}
-
-// templateVarMetricToken matches a metric-name-shaped token, the same
-// conservative extraction internal/corpus applies to an unparseable panel
-// (see corpus.metricToken) -- reimplemented here rather than exported from
-// production, since this is fixture-only test isolation, not something
-// internal/corpus needs to expose.
-var templateVarMetricToken = regexp.MustCompile(`[a-zA-Z_:][a-zA-Z0-9_:]*`)
-
-// templateVariableMetrics fetches each dashboard's raw definition straight
-// from Grafana (grafana.Dashboard does not carry templating, only panel
-// queries) and returns every metric-shaped token found in a template
-// variable's query/definition that dashOnly did NOT already mark used from
-// a panel query. That is precisely the set of metrics a template-variable
-// scan would add on top of what internal/grafana already collects.
-func templateVariableMetrics(t *testing.T, dashboards []grafana.Dashboard, dashOnly corpus.Corpus, known map[string]bool) map[string]bool {
-	t.Helper()
-	token := grafanaToken(t)
-	client := &http.Client{Timeout: 30 * time.Second}
-
-	found := map[string]bool{}
-	for _, d := range dashboards {
-		req, _ := http.NewRequest("GET", grafanaURL+"/api/dashboards/uid/"+d.UID, nil)
-		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("fetch dashboard %s for template-variable check: %v", d.UID, err)
-		}
-		var body struct {
-			Dashboard struct {
-				Templating struct {
-					List []struct {
-						Definition string `json:"definition"`
-					} `json:"list"`
-				} `json:"templating"`
-			} `json:"dashboard"`
-		}
-		derr := json.NewDecoder(resp.Body).Decode(&body)
-		resp.Body.Close()
-		if derr != nil {
-			t.Fatalf("decode dashboard %s for template-variable check: %v", d.UID, derr)
-		}
-		for _, v := range body.Dashboard.Templating.List {
-			if strings.TrimSpace(v.Definition) == "" {
-				continue
-			}
-			for _, tok := range templateVarMetricToken.FindAllString(v.Definition, -1) {
-				if known[tok] && !dashOnly.Used[tok] {
-					found[tok] = true
-				}
-			}
-		}
-	}
-	return found
 }
 
 // runMimirtool runs one mimirtool subcommand, failing the test with its

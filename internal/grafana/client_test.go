@@ -71,6 +71,49 @@ func TestDashboardsWalksNestedPanels(t *testing.T) {
 	}
 }
 
+// TestDashboardsCollectsVariableQueriesBothShapes pins the two shapes a
+// template variable's query takes across a real dashboard's own
+// templating.list: a plain string for a datasource variable, and an
+// object with its own "query" field for a Prometheus query variable. The
+// vendored dashboard uses both across its entries, so a reader that only
+// handles one silently drops the other's metric references.
+func TestDashboardsCollectsVariableQueriesBothShapes(t *testing.T) {
+	c := stub(t,
+		`[{"uid":"a","title":"A"}]`,
+		map[string]string{"a": `{"dashboard":{"uid":"a","title":"A","panels":[],"templating":{"list":[
+			{"name":"ds_prometheus","query":"prometheus"},
+			{"name":"job","query":"label_values(node_uname_info, job)"},
+			{"name":"node","query":{"query":"label_values(node_uname_info{job=\"$job\"}, instance)","refId":"Prometheus-node-Variable-Query"}}
+		]}}}`},
+	)
+	got, err := c.Dashboards(context.Background())
+	if err != nil {
+		t.Fatalf("Dashboards: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d dashboards, want 1", len(got))
+	}
+	// ds_prometheus is a datasource variable: its "query" field is the
+	// plain string "prometheus", a datasource UID rather than a metric
+	// query. It is collected all the same -- extraction does not need to
+	// know a variable's type to be safe, since a plain non-PromQL string
+	// resolves to no known metric downstream -- which is exactly why this
+	// test checks for it rather than pretending it does not exist.
+	want := map[string]bool{
+		"prometheus":                         true,
+		"label_values(node_uname_info, job)": true,
+		`label_values(node_uname_info{job="$job"}, instance)`: true,
+	}
+	if len(got[0].VariableQueries) != len(want) {
+		t.Fatalf("VariableQueries = %v, want %d entries: %v", got[0].VariableQueries, len(want), want)
+	}
+	for _, q := range got[0].VariableQueries {
+		if !want[q] {
+			t.Errorf("unexpected variable query %q", q)
+		}
+	}
+}
+
 func TestDashboardsSkipsTargetsWithNoExpr(t *testing.T) {
 	c := stub(t,
 		`[{"uid":"a","title":"A"}]`,

@@ -117,6 +117,37 @@ func TestDashboardsExtendUsed(t *testing.T) {
 	}
 }
 
+// A metric named only in a dashboard's own template-variable definition is
+// used. The vendored "Node Exporter Full" dashboard's job/nodename/node
+// dropdowns all query label_values(node_uname_info, ...), and no panel
+// names that metric at all -- so a reader that only walks panel targets
+// silently grades it unreferenced on an install with Grafana configured
+// and no query log, which is the ordinary starting configuration. Grafana
+// issues that query to Prometheus every time the dashboard loads, so this
+// is a real read, not a technicality.
+func TestDashboardVariableQueriesExtendUsed(t *testing.T) {
+	c := Build(Sources{
+		Dashboards: []grafana.Dashboard{{
+			UID: "d", Title: "D",
+			VariableQueries: []string{`label_values(variable_only_metric, job)`},
+		}},
+	}, []string{"variable_only_metric", "nothing_reads_this"})
+
+	if !c.Used["variable_only_metric"] {
+		t.Error("a metric named only in a dashboard's template-variable query is not marked used")
+	}
+	if c.Used["nothing_reads_this"] {
+		t.Error("a metric nothing reads was marked used")
+	}
+	// label_values(...) is a Grafana template function, not PromQL, so this
+	// always takes the same conservative fallback path an unparseable panel
+	// does -- reported under its own label so an operator does not read
+	// this as a broken panel.
+	if len(c.DashboardVariablesUnparsed) != 1 {
+		t.Errorf("DashboardVariablesUnparsed = %v, want the variable query named", c.DashboardVariablesUnparsed)
+	}
+}
+
 // An unparseable RULE is fatal. Rules are Prometheus' own configuration, and
 // one jetsam cannot read means it is misreading something fundamental.
 func TestAnUnparseableRuleIsFatal(t *testing.T) {

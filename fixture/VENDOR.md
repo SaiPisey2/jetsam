@@ -195,6 +195,14 @@ isolate it, and `TestRulesAloneLeaveTheDashboardCanariesUnreferenced`
 pins the before-state with neither dashboards nor the query log, so the
 flip is attributed to dashboards and nothing else.
 
+A third canary, found by isolating the oracle rather than pinned in
+advance: `node_uname_info` is named by no panel query at all, only by the
+vendored dashboard's `job`/`nodename`/`node` template variables (all
+`label_values(node_uname_info, ...)`). `TestDashboardVariablesAreUsedWithNoQueryLogAtAll`
+asserts it grades `used` from a dashboards-only corpus with no query log
+-- the real-world shape of a fresh install -- and is the assertion that
+would have caught the gap described below before it shipped.
+
 ### Differential oracle against mimirtool
 
 A differential oracle, `fixture/oracle_test.go`, checks jetsam's answer
@@ -207,23 +215,43 @@ mimirtool's. `mimirtool analyze ruler` does not work against a plain
 Prometheus -- it calls a Mimir ruler API a plain Prometheus does not
 serve -- so the oracle covers dashboards only.
 
-Isolating the comparison this way surfaced a real, narrow gap:
-`internal/grafana.Client.Dashboards` collects panel target queries only
-(`Dashboard`'s doc comment says so explicitly -- "the queries its panels
-run"), not a dashboard's own template-variable definitions
-(`templating.list[]`, Grafana's "job"/"nodename"/"instance" dropdowns).
-The vendored dashboard's `job`, `nodename`, and `node` variables all query
+Isolating the comparison this way first surfaced a real, narrow gap:
+`internal/grafana.Client.Dashboards` collected panel target queries only,
+not a dashboard's own template-variable definitions (`templating.list[]`,
+Grafana's "job"/"nodename"/"instance" dropdowns). The vendored dashboard's
+`job`, `nodename`, and `node` variables all query
 `label_values(node_uname_info, ...)`, and `node_uname_info` appears
 nowhere in any panel's target expression -- so a dashboards-only corpus
-never marks it used, while mimirtool's dashboard analysis does count it.
-Grafana genuinely issues that query to Prometheus whenever the dashboard
-loads, so this is a real evidence source jetsam's `Dashboards` reader
-does not see. It is not a production safety gap in practice: the live
-query log also captures that same read, so jetsam's actual (full-corpus)
-verdict for `node_uname_info` is unaffected -- the gap is visible only
-because the oracle now deliberately looks at dashboards in isolation, for
-the same reason it needs to. `fixture/oracle_test.go` names this
-metric-by-metric (`templateVariableMetrics`) and logs it rather than
-failing on it; whether `internal/grafana` should also scan
-`templating.list[]` is a production-code question, out of this task's
-scope, for whoever picks it up next.
+never marked it used, while mimirtool's dashboard analysis did. This was
+a real safety gap, not a documentation boundary: on an install with
+Grafana configured and no query log -- the ordinary starting
+configuration -- `node_uname_info` graded `unreferenced`, and
+`-include-unreferenced` would propose dropping a metric that three of the
+dashboard's own variables resolve through, breaking every panel on it.
+"The fixture's query log happens to also catch this read" was never a
+defence, because a fresh install has no log at all.
+
+**Fixed.** `grafana.Dashboard` now carries `VariableQueries []string`
+alongside `Queries`, collected from `templating.list[].query` (handling
+both shapes it takes across a real dashboard: a plain string for a
+datasource variable, and `{"query": "...", "refId": "..."}` for a
+Prometheus query variable). `corpus.Build` runs `VariableQueries` through
+the same substitute-then-extract path as a panel query; `label_values()`
+is a Grafana template function, not PromQL, so this reliably takes the
+same conservative fallback an unparseable panel does, reported under
+`Corpus.DashboardVariablesUnparsed` rather than
+`DashboardPanelsUnparsed` so an operator does not read it as a broken
+panel. On the vendored dashboard this adds exactly two names to the
+dashboards-only used-set: `node_uname_info` (the fix), and a harmless
+`prometheus` from the `ds_prometheus` datasource variable's plain-string
+query -- which is not a real metric in this fixture's inventory, so it
+never affects any verdict (`Refs.Resolve` already hits every literally-
+named string in `r.Names` regardless of whether it exists in `allMetrics`;
+this is pre-existing `internal/corpus` behavior, not something this fix
+introduced). `TestKnownArchetypesGradeCorrectly`,
+`TestDashboardVariablesAreUsedWithNoQueryLogAtAll` in
+`fixture/verdict_test.go`, and equivalent unit tests in
+`internal/grafana` and `internal/corpus` cover it. With the gap closed,
+mimirtool and jetsam agree on the dashboard-only used-set with no
+exception needed -- `fixture/oracle_test.go` no longer carries a named
+allowance for this metric.

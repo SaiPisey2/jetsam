@@ -55,11 +55,29 @@ func statusCode(err error) int {
 }
 
 // Dashboard is one dashboard reduced to the only thing jetsam needs: the
-// queries its panels run.
+// queries its panels run, plus the queries its own template-variable
+// definitions run.
+//
+// A dashboard reads metrics through its variables too, deliberately, not
+// as an afterthought: a "job"/"nodename"/"instance" dropdown is typically
+// backed by a label_values(metric, label) query, and Grafana issues that
+// query to Prometheus every time the dashboard loads. A metric named only
+// there -- never in any panel's target expr -- is still a real read, and
+// dropping it breaks every panel whose variable resolves through it. See
+// the vendored "Node Exporter Full" dashboard's job/nodename/node
+// variables, which all query label_values(node_uname_info, ...): no
+// panel names node_uname_info at all.
 type Dashboard struct {
 	UID     string
 	Title   string
 	Queries []string
+	// VariableQueries holds each template variable's own query, kept
+	// separate from Queries rather than merged into it: a variable query
+	// is a different kind of thing (nearly always a Grafana template
+	// function like label_values(...), not PromQL a panel would run), and
+	// a caller reporting what it could not parse should be able to say
+	// which kind it was instead of implying a panel is broken.
+	VariableQueries []string
 }
 
 type Client struct {
@@ -151,6 +169,39 @@ func collect(ps []panel, out *[]string) {
 	}
 }
 
+// templateVar is one entry of a dashboard's templating.list. Its query
+// field takes two shapes across a real dashboard: a plain string for a
+// datasource variable ("prometheus"), and an object carrying its own
+// "query" field for a Prometheus query variable
+// ({"query":"label_values(...)","refId":"..."}). Decoding it as
+// json.RawMessage and trying both shapes handles either without needing
+// to know up front which one a given entry uses.
+type templateVar struct {
+	Query json.RawMessage `json:"query"`
+}
+
+// variableQuery extracts one template variable's query text, handling
+// both shapes Query can take. It returns "" for a shape it does not
+// recognise (a plain datasource name is not a query at all) rather than
+// erroring: template variables not shaped like a Prometheus query are
+// ordinary, not a sign of a malformed dashboard.
+func variableQuery(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var obj struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return obj.Query
+	}
+	return ""
+}
+
 // Dashboards returns every dashboard in the instance, with its panel queries.
 //
 // Every dashboard is read; there is no folder or tag filter. More corpus means
@@ -166,9 +217,12 @@ func (c *Client) Dashboards(ctx context.Context) ([]Dashboard, error) {
 	for _, h := range hits {
 		var body struct {
 			Dashboard *struct {
-				UID    string  `json:"uid"`
-				Title  string  `json:"title"`
-				Panels []panel `json:"panels"`
+				UID        string  `json:"uid"`
+				Title      string  `json:"title"`
+				Panels     []panel `json:"panels"`
+				Templating struct {
+					List []templateVar `json:"list"`
+				} `json:"templating"`
 			} `json:"dashboard"`
 		}
 		path := "/api/dashboards/uid/" + url.PathEscape(h.UID)
@@ -188,7 +242,15 @@ func (c *Client) Dashboards(ctx context.Context) ([]Dashboard, error) {
 		}
 		var qs []string
 		collect(body.Dashboard.Panels, &qs)
-		out = append(out, Dashboard{UID: h.UID, Title: h.Title, Queries: qs})
+
+		var vqs []string
+		for _, v := range body.Dashboard.Templating.List {
+			if q := variableQuery(v.Query); q != "" {
+				vqs = append(vqs, q)
+			}
+		}
+
+		out = append(out, Dashboard{UID: h.UID, Title: h.Title, Queries: qs, VariableQueries: vqs})
 	}
 	return out, nil
 }

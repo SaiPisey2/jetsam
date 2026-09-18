@@ -245,6 +245,25 @@ func TestRulesAloneLeaveTheDashboardCanariesUnreferenced(t *testing.T) {
 	}
 }
 
+// TestDashboardVariablesAreUsedWithNoQueryLogAtAll is the assertion that
+// would have caught the gap this sub-project shipped with: no vendored
+// panel query names node_uname_info, only the vendored dashboard's own
+// job/nodename/node template variables, which all query
+// label_values(node_uname_info, ...). A dashboards-only corpus -- no
+// rules, no query log at all -- is the ordinary shape of a fresh install
+// with Grafana configured, and it must still grade node_uname_info used;
+// otherwise "-include-unreferenced" proposes dropping a metric every
+// panel on the dashboard depends on to resolve its own variables.
+func TestDashboardVariablesAreUsedWithNoQueryLogAtAll(t *testing.T) {
+	inv, src := liveSources(t)
+	dashOnly := corpus.Build(corpus.Sources{Dashboards: src.Dashboards}, metricNames(inv))
+	if !dashOnly.Used["node_uname_info"] {
+		t.Error("node_uname_info is not used in a dashboards-only corpus with no query log -- " +
+			"the job/nodename/node template variables all read it via label_values(), " +
+			"and a fresh install would otherwise grade it unreferenced and offer to drop it")
+	}
+}
+
 // verdictFor returns one metric's verdict, failing loudly if the metric is
 // absent from the result entirely -- an absent canary would otherwise read
 // as "not droppable" or "not used" and pass a test for the wrong reason.

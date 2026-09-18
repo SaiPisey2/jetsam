@@ -57,6 +57,13 @@ type Corpus struct {
 	// DashboardPanelsUnparsed names every dashboard panel that would not
 	// parse even after substitution. Reported, never fatal.
 	DashboardPanelsUnparsed []string
+	// DashboardVariablesUnparsed names every dashboard template-variable
+	// query that would not parse even after substitution -- kept separate
+	// from DashboardPanelsUnparsed because a variable query is a different
+	// kind of thing (almost always a Grafana template function like
+	// label_values(...), not PromQL a panel would run) and reporting it
+	// under the panel label would misleadingly suggest a panel is broken.
+	DashboardVariablesUnparsed []string
 
 	LogRead      bool
 	LogSpan      time.Duration
@@ -79,7 +86,12 @@ var metricToken = regexp.MustCompile(`[a-zA-Z_:][a-zA-Z0-9_:]*`)
 // DASHBOARD PANEL is contained instead: one malformed panel in a large
 // Grafana install must not make every drop unreachable, so its
 // metric-name-shaped tokens are conservatively marked used and the panel is
-// named in DashboardPanelsUnparsed for reporting.
+// named in DashboardPanelsUnparsed for reporting. A dashboard's own
+// TEMPLATE-VARIABLE queries (VariableQueries) go through the same
+// substitute-then-extract path as a panel query, and land in
+// DashboardVariablesUnparsed under the same contained treatment when they
+// do not parse -- which is the ordinary case, since a template variable is
+// usually a Grafana function like label_values(...) rather than PromQL.
 func Build(src Sources, allMetrics []string) Corpus {
 	c := Corpus{
 		Used:                 map[string]bool{},
@@ -124,6 +136,34 @@ func Build(src Sources, allMetrics []string) Corpus {
 				// over-protects rather than under-protects.
 				c.DashboardPanelsUnparsed = append(c.DashboardPanelsUnparsed,
 					fmt.Sprintf("dashboard %s (%s): %v", d.Title, d.UID, err))
+				for _, tok := range metricToken.FindAllString(q, -1) {
+					if known[tok] {
+						c.Used[tok] = true
+					}
+				}
+				continue
+			}
+			for _, m := range refs.Resolve(allMetrics) {
+				c.Used[m] = true
+			}
+		}
+
+		// A dashboard reads metrics through its template-variable
+		// definitions too -- typically label_values(metric, label), which
+		// populates a "job"/"nodename"/"instance" dropdown -- and Grafana
+		// issues that query to Prometheus every time the dashboard loads.
+		// label_values(...) is a Grafana template function, not PromQL, so
+		// Extract reliably fails on it and this reliably takes the same
+		// conservative fallback a malformed panel does: metric-name-shaped
+		// tokens that are genuinely known metrics are marked used, named
+		// under their own label so a reader is not misled into thinking a
+		// panel is broken.
+		for _, q := range d.VariableQueries {
+			c.Queries++
+			refs, err := Extract(Substitute(q))
+			if err != nil {
+				c.DashboardVariablesUnparsed = append(c.DashboardVariablesUnparsed,
+					fmt.Sprintf("dashboard %s (%s): variable %s", d.Title, d.UID, q))
 				for _, tok := range metricToken.FindAllString(q, -1) {
 					if known[tok] {
 						c.Used[tok] = true
