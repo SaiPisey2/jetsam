@@ -956,21 +956,29 @@ const aggregateQueryMaxBytes = 64 << 20
 
 // measureKeptSeries issues one instant query counting how many series
 // aggregating metric down to keep would produce:
-// count(count by (<keep>) ({__name__="<metric>"})). It cannot reuse
-// promapi.Client for this -- QueryJobsFor answers a different question and
-// its request-building is unexported -- so it mirrors that idiom directly:
-// the metric name is passed through %q, never concatenated bare, because a
-// metric name is untrusted input (Prometheus 3 permits UTF-8 names) and
-// this repo has already shipped one injection through exactly this kind of
-// interpolation. When keep is empty the clause is "by ()", which collapses
-// every series to one -- correct for a consumer that aggregates the metric
-// down to a single number.
+// count(count by (<keep>) ({__name__="<metric>", __ignore_usage__=""})). It
+// cannot reuse promapi.Client for this -- QueryJobsFor answers a different
+// question and its request-building is unexported -- so it mirrors that
+// idiom directly: the metric name is passed through %q, never concatenated
+// bare, because a metric name is untrusted input (Prometheus 3 permits
+// UTF-8 names) and this repo has already shipped one injection through
+// exactly this kind of interpolation. When keep is empty the clause is
+// "by ()", which collapses every series to one -- correct for a consumer
+// that aggregates the metric down to a single number.
+//
+// querylog.IgnoreUsageLabel marks this query as jetsam's own tooling, not
+// real usage, for the same reason promapi.QueryJobsFor's own query carries
+// it: Prometheus logs every /api/v1/query call, and without the marker
+// running `aggregate` once would make every metric it measured look, on
+// the NEXT run, like it is read by a `count` consumer -- the tool
+// poisoning the evidence it depends on. The matcher is inert; see the
+// constant's own doc comment for why no result changes.
 func measureKeptSeries(ctx context.Context, baseURL string, hc *http.Client, metric string, keep []string) (int, error) {
 	by := "()"
 	if len(keep) > 0 {
 		by = "(" + strings.Join(keep, ", ") + ")"
 	}
-	query := fmt.Sprintf("count(count by %s ({__name__=%q}))", by, metric)
+	query := fmt.Sprintf(`count(count by %s ({__name__=%q, %s=""}))`, by, metric, querylog.IgnoreUsageLabel)
 
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/query?" + (url.Values{"query": {query}}).Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)

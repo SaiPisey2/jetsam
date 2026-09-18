@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,7 +36,7 @@ func aggregateFixture(t *testing.T, rawSeries, keptSeries int, extraYAML string)
 			]}]}}`))
 		case "/api/v1/query":
 			q := r.URL.Query().Get("query")
-			if !strings.Contains(q, "count(count by (path) ({__name__=\"http_requests_total\"}))") {
+			if !strings.Contains(q, `count(count by (path) ({__name__="http_requests_total", __ignore_usage__=""}))`) {
 				t.Errorf("unexpected measurement query: %s", q)
 			}
 			w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"` + itoa(keptSeries) + `"]}]}}`))
@@ -241,6 +242,85 @@ func TestAggregateReportsADeclinedConsumerEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(out, "not rewritable") {
 		t.Errorf("report does not say the consumer is not rewritable:\n%s", out)
+	}
+}
+
+// TestAggregateRunTwiceAgainstTheSameLogProducesTheSameResult is the
+// regression test for the class of defect this round fixes: Prometheus logs
+// every /api/v1/query call it answers, including jetsam's own measurement
+// query, so a metric aggregate measures on one run would -- without a
+// marker naming that query as tooling -- look, on the NEXT run, like it is
+// read ad hoc by a `count` consumer. Running the tool would be what stops
+// the tool working. This reproduces exactly that sequence: the first run's
+// measurement query is captured and written into a query log as a real
+// Prometheus log line, and the second run, configured to read that log,
+// must reach the same answer as the first.
+func TestAggregateRunTwiceAgainstTheSameLogProducesTheSameResult(t *testing.T) {
+	dir := t.TempDir()
+
+	var loggedQuery string
+	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/status/tsdb":
+			w.Write([]byte(`{"status":"success","data":{"seriesCountByMetricName":[{"name":"http_requests_total","value":400}]}}`))
+		case "/api/v1/rules":
+			w.Write([]byte(`{"status":"success","data":{"groups":[{"name":"g","rules":[
+				{"name":"path:http_requests_total:sum","type":"recording","query":"sum by (path) (http_requests_total)"}
+			]}]}}`))
+		case "/api/v1/query":
+			// Prometheus itself would write exactly this query string to
+			// its own query log -- captured here rather than hand-built,
+			// so this test fails loudly if measureKeptSeries' query shape
+			// ever changes without this test being updated to match.
+			loggedQuery = r.URL.Query().Get("query")
+			w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"12"]}]}}`))
+		default:
+			t.Errorf("unexpected request to %s", r.URL.Path)
+		}
+	}))
+	defer prom.Close()
+
+	cfgPath := filepath.Join(dir, "jetsam.yaml")
+	os.WriteFile(cfgPath, []byte("prometheus:\n  url: "+prom.URL+"\n  timeout: 5s\n"), 0o644)
+
+	var first bytes.Buffer
+	if rc := aggregateCmd([]string{"-config", cfgPath}, &first, &bytes.Buffer{}, noEnv); rc != 0 {
+		t.Fatalf("first run: aggregateCmd = %d", rc)
+	}
+	const wantLine = "http_requests_total: 400 series -> 12 kept (saves 388)"
+	if !strings.Contains(first.String(), wantLine) {
+		t.Fatalf("first run does not propose the metric as expected:\n%s", first.String())
+	}
+	if loggedQuery == "" {
+		t.Fatal("test setup: the measurement query was never captured")
+	}
+
+	// Write a query log carrying exactly the line a real Prometheus with
+	// global.query_log_file set would have written for that call.
+	logPath := filepath.Join(dir, "queries.log")
+	logLine := fmt.Sprintf(`{"time":"2026-09-19T00:00:00.000Z","httpRequest":{"clientIP":"1.2.3.4","method":"GET","path":"/api/v1/query"},"params":{"query":%q}}`+"\n", loggedQuery)
+	if err := os.WriteFile(logPath, []byte(logLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgWithLog := filepath.Join(dir, "jetsam-with-log.yaml")
+	os.WriteFile(cfgWithLog, []byte("prometheus:\n  url: "+prom.URL+"\n  timeout: 5s\n"+
+		"query_log:\n  path: "+logPath+"\n  min_window: 1s\n"), 0o644)
+
+	var second bytes.Buffer
+	if rc := aggregateCmd([]string{"-config", cfgWithLog}, &second, &bytes.Buffer{}, noEnv); rc != 0 {
+		t.Fatalf("second run: aggregateCmd = %d:\n%s", rc, second.String())
+	}
+	if !strings.Contains(second.String(), wantLine) {
+		t.Fatalf("second run, with jetsam's own prior measurement query now in the log, no longer "+
+			"reaches the same answer as the first:\nfirst:\n%s\nsecond:\n%s", first.String(), second.String())
+	}
+	if strings.Contains(second.String(), "disagree") {
+		t.Errorf("second run treats jetsam's own logged measurement query as a disagreeing consumer:\n%s", second.String())
+	}
+	if strings.Contains(second.String(), "CAVEAT") {
+		t.Errorf("second run adds a caveat for jetsam's own query, which is tooling, not real usage:\n%s", second.String())
 	}
 }
 

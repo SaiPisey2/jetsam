@@ -117,6 +117,14 @@ alongside the numbers, before the detail -- see Limits.
   outside that log's window, `remote_read`, or anything scraping
   `/federate`. A metric read only through one of those looks unreferenced
   or, if it happens to also predate the log's window, unqueried in error.
+- **A query log that also captures tooling stays honest.** Anything that
+  probes your Prometheus with PromQL -- `mimirtool analyze prometheus`,
+  jetsam's own `aggregate` measurement query and job-membership check --
+  gets logged exactly like a human's query. jetsam tags its own queries
+  with the established `__ignore_usage__` label and skips any logged query
+  carrying it, whoever issued it, so a metric a tool merely probed does not
+  look read and running `aggregate` once does not change what `propose`
+  sees on the next run.
 - **The query log records PromQL queries, not reads.** Prometheus'
   `global.query_log_file` logs what its query ENGINE evaluated. A metric
   read through `/api/v1/label/<name>/values` or `/api/v1/series` never

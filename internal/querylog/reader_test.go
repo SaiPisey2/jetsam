@@ -347,3 +347,46 @@ func TestReadingReportsTheEndOfItsCoverage(t *testing.T) {
 		t.Errorf("End = %s, want %s", r.End, want)
 	}
 }
+
+// TestReadSkipsAQueryCarryingTheIgnoreUsageMarker pins half of the fix for
+// jetsam poisoning its own evidence: mimirtool (and jetsam's own
+// promapi.QueryJobsFor and cmd/jetsam's aggregate measurement query) tag a
+// tooling query with IgnoreUsageLabel specifically so usage analysis skips
+// it. A query carrying that label must contribute nothing to the corpus.
+func TestReadSkipsAQueryCarryingTheIgnoreUsageMarker(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "queries.log",
+		entry("2026-08-01T00:00:00.000Z", `count by (job) ({__name__=\"tool_probed_metric\", __ignore_usage__=\"\"})`, "read"))
+
+	r, err := Read(filepath.Join(dir, "queries.log"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(r.Queries) != 0 {
+		t.Errorf("Queries = %v, want none -- the marked query is tooling, not usage", r.Queries)
+	}
+	// Still counts toward coverage, the same way a rule evaluation does:
+	// the log genuinely ran and would have caught a real read had one
+	// happened.
+	if r.Entries != 1 {
+		t.Errorf("Entries = %d, want 1", r.Entries)
+	}
+}
+
+// TestReadKeepsAnOtherwiseIdenticalQueryWithoutTheMarker is
+// TestReadSkipsAQueryCarryingTheIgnoreUsageMarker's negative twin: the same
+// shape of query, minus the marker, is ordinary evidence and must still be
+// read as a real consumer.
+func TestReadKeepsAnOtherwiseIdenticalQueryWithoutTheMarker(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "queries.log",
+		entry("2026-08-01T00:00:00.000Z", `count by (job) ({__name__=\"human_read_metric\"})`, "read"))
+
+	r, err := Read(filepath.Join(dir, "queries.log"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(r.Queries) != 1 || !strings.Contains(r.Queries[0], "human_read_metric") {
+		t.Errorf("Queries = %v, want the one genuine read", r.Queries)
+	}
+}

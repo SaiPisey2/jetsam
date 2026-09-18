@@ -276,7 +276,7 @@ func TestGetErrorNeverEchoesUserinfoOrQueryString(t *testing.T) {
 }
 
 func TestQueryJobsForQuotesAMetricNameThatIsAPromQLKeyword(t *testing.T) {
-	const wantQuery = `count by (job) ({__name__="on"})`
+	const wantQuery = `count by (job) ({__name__="on", __ignore_usage__=""})`
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("query"); got != wantQuery {

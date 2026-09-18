@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/SaiPisey2/jetsam/internal/querylog"
 )
 
 // maxResponseBytes bounds every response body jetsam decodes. A legitimate
@@ -252,7 +254,13 @@ func (c *Client) QueryJobsFor(ctx context.Context, metric string) ([]string, err
 			Metric map[string]string `json:"metric"`
 		} `json:"result"`
 	}
-	q := url.Values{"query": []string{fmt.Sprintf("count by (job) ({__name__=%q})", metric)}}
+	// querylog.IgnoreUsageLabel marks this as jetsam's own tooling query,
+	// not real usage: Prometheus writes every /api/v1/query call to its
+	// query log the same way it writes a human's or a dashboard's, and
+	// without this marker THIS query -- run again on a later scan -- would
+	// itself show up as a logged read of metric. The matcher is inert: see
+	// the constant's own doc comment for why no result changes.
+	q := url.Values{"query": []string{fmt.Sprintf(`count by (job) ({__name__=%q, %s=""})`, metric, querylog.IgnoreUsageLabel)}}
 	if err := c.get(ctx, "/api/v1/query", q, &data); err != nil {
 		return nil, err
 	}
