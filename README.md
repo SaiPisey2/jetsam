@@ -100,14 +100,17 @@ config the way `propose` does. A recording rule cannot read a metric that
 has already been dropped at ingest.
 
 A metric only earns a name here when jetsam has actually measured the
-saving against your Prometheus, every consumer of it is a rule agreeing on
-the same operator and labels, and the saving clears
-`aggregate.min_series_saved` (100 by default). Anything else is refused,
-with the reason -- read by a dashboard jetsam cannot rewrite, consumers
-that disagree, or a metric no rule aggregates at all. A metric your query
-log recorded a read of is still proposed, not refused: that read is a
-historical event, not a standing consumer, and its caveat is printed right
-alongside the numbers, before the detail -- see Limits.
+saving against your Prometheus, every consumer jetsam can rewrite is a
+rule agreeing on the same operator and labels, and the saving clears
+`aggregate.min_series_saved` (100 by default). Anything else is withheld
+or refused -- a rule that already records the same aggregation under a
+different name would otherwise ask you to point that rule at itself, a
+dashboard reads it and jetsam cannot rewrite Grafana, consumers disagree,
+or no rule aggregates it at all. A metric your query log recorded a read
+of is still proposed, not refused: jetsam cannot tell that read apart from
+a dashboard or API client that keeps re-running it, and says so in a
+caveat printed right alongside the numbers, before the detail -- see
+Limits.
 
 ## Limits
 
@@ -181,11 +184,19 @@ alongside the numbers, before the detail -- see Limits.
   not one query at a time.
 - **A dashboard refuses `aggregate`; a logged query only caveats it.** A
   dashboard keeps reading for as long as it exists and jetsam cannot edit
-  Grafana, so it withholds the proposal outright. A query the log recorded
-  is a historical event, not a standing consumer -- its labels already
-  count toward the safety check, so `aggregate` still proposes the metric
-  and names the query in a caveat instead: re-running it later is not
-  guaranteed to return what it did.
+  Grafana, so it withholds the proposal outright. A query the log
+  recorded already counts toward the safety check, but jetsam cannot tell
+  a one-off ad-hoc read from a dashboard or API client re-running it on a
+  schedule -- `query_log.path` set with `grafana.url` unset relies on the
+  log for exactly that population. `aggregate` still proposes the metric
+  and names that uncertainty in a caveat instead of refusing.
+- **A rule that already records this aggregation withholds it too.**
+  `aggregate`'s generated rule names follow `level:metric:operation`, so a
+  pre-existing rule performing the same collapse often already has that
+  exact name. Proposing it anyway would ask you to point that rule's own
+  `expr` at its own `record` name, which Prometheus accepts and evaluates
+  to its previous value forever -- withheld, with the colliding rule
+  named, rather than shown as an ordinary consumer.
 
 ## License
 

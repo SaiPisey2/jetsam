@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/SaiPisey2/jetsam/internal/promapi"
+	"github.com/prometheus/prometheus/promql/parser"
 )
 
 // Reading is what one pass over the log found.
@@ -179,6 +180,45 @@ func Read(glob string) (*Reading, error) {
 	return r, nil
 }
 
+// ignoreUsageParser is this file's own PromQL parser instance, the same
+// one-shared-instance idiom corpus and emit already use -- there is
+// nothing per-call about how it is configured.
+var ignoreUsageParser = parser.NewParser(parser.Options{})
+
+// isIgnoreUsageMatcher reports whether q carries promapi.IgnoreUsageLabel
+// as an actual label matcher NAME on some selector -- the only shape that
+// means "tooling marked this query", as opposed to the marker text
+// appearing incidentally in a label value, a string-literal argument, or a
+// metric name that happens to contain it.
+//
+// A parse error returns false: readMarker's own comment already explains
+// why this file selects positively (on httpRequest) rather than rejects on
+// a substring, for the identical reason -- a query jetsam cannot parse
+// must not be silently treated as tooling and erased, because that is the
+// dangerous direction. Every other check in this file already fails
+// toward KEEPING evidence rather than discarding it; this is the same
+// discipline applied to the one check added on top of it.
+func isIgnoreUsageMatcher(q string) bool {
+	expr, err := ignoreUsageParser.ParseExpr(q)
+	if err != nil {
+		return false
+	}
+	found := false
+	parser.Inspect(expr, func(n parser.Node, _ []parser.Node) error {
+		vs, ok := n.(*parser.VectorSelector)
+		if !ok {
+			return nil
+		}
+		for _, m := range vs.LabelMatchers {
+			if m.Name == promapi.IgnoreUsageLabel {
+				found = true
+			}
+		}
+		return nil
+	})
+	return found
+}
+
 func readFile(path string, seen map[string]bool) (entries int, earliest, latest time.Time, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -253,13 +293,24 @@ func readFile(path string, seen map[string]bool) (entries int, earliest, latest 
 		if q == "" {
 			continue
 		}
-		// A query carrying promapi.IgnoreUsageLabel is tooling signalling
-		// itself as not-real-usage, not a human or dashboard read -- see
-		// that constant's own doc comment for why the label lives with
-		// the queries jetsam CONSTRUCTS rather than here, and why this
-		// must be checked at read time regardless: a caller cannot
-		// un-fold a query this package already handed it as evidence.
-		if strings.Contains(q, promapi.IgnoreUsageLabel) {
+		// A query carrying promapi.IgnoreUsageLabel AS A LABEL MATCHER is
+		// tooling signalling itself as not-real-usage, not a human or
+		// dashboard read -- see that constant's own doc comment for why
+		// the label lives with the queries jetsam CONSTRUCTS rather than
+		// here, and why this must be checked at read time regardless: a
+		// caller cannot un-fold a query this package already handed it
+		// as evidence. strings.Contains alone is only the cheap prefilter
+		// (see readMarker's own comment on the same tradeoff, one check
+		// up): the marker text can appear in a label VALUE
+		// (up{env="__ignore_usage__"}), a string-literal ARGUMENT
+		// (label_replace(up, "team", "__ignore_usage__", "", "")), or
+		// even a METRIC NAME (my__ignore_usage__total), and every one of
+		// those is a genuine read that must not be erased from the
+		// corpus -- measured, not theoretical: an earlier version of
+		// this check that skipped on the substring alone erased all
+		// three. isIgnoreUsageMatcher confirms the marker is actually a
+		// matcher NAME before this line ever skips a query.
+		if strings.Contains(q, promapi.IgnoreUsageLabel) && isIgnoreUsageMatcher(q) {
 			continue
 		}
 		seen[q] = true

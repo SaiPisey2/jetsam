@@ -391,3 +391,53 @@ func TestReadKeepsAnOtherwiseIdenticalQueryWithoutTheMarker(t *testing.T) {
 		t.Errorf("Queries = %v, want the one genuine read", r.Queries)
 	}
 }
+
+// TestIsIgnoreUsageMatcherRequiresARealLabelMatcher is the mutation-pinning
+// table for the marker check: the marker text must be an actual label
+// matcher NAME on some selector, never merely present somewhere in the
+// query text. Measured against a substring-only version of this check: it
+// skipped a query using the marker as a label VALUE, as a string-literal
+// ARGUMENT, and as part of a METRIC NAME -- three genuine reads erased
+// from the corpus, which is how `propose` proposes a drop for data
+// something still reads.
+func TestIsIgnoreUsageMatcherRequiresARealLabelMatcher(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{"a real matcher", `count by (job) ({__name__="m", __ignore_usage__=""})`, true},
+		{"the marker as a label value", `up{env="__ignore_usage__"}`, false},
+		{"the marker inside a string-literal argument", `label_replace(up, "team", "__ignore_usage__", "", "")`, false},
+		{"the marker inside a metric name", `my__ignore_usage__total`, false},
+		{"an ordinary read with no marker at all", `up`, false},
+		{"unparseable text carrying the marker", `count by (job) ({__name__="m", __ignore_usage__=`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isIgnoreUsageMatcher(tc.query); got != tc.want {
+				t.Errorf("isIgnoreUsageMatcher(%q) = %v, want %v", tc.query, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReadKeepsAQueryWhoseMarkerIsNotARealMatcher is the Read-level
+// integration pin for the same defect: each of the three false-positive
+// shapes above must still end up in Reading.Queries, not be silently
+// erased.
+func TestReadKeepsAQueryWhoseMarkerIsNotARealMatcher(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "queries.log",
+		entry("2026-08-01T00:01:00.000Z", `up{env=\"__ignore_usage__\"}`, "read")+
+			entry("2026-08-01T00:02:00.000Z", `label_replace(up, \"team\", \"__ignore_usage__\", \"\", \"\")`, "read")+
+			entry("2026-08-01T00:03:00.000Z", `my__ignore_usage__total`, "read"))
+
+	r, err := Read(filepath.Join(dir, "queries.log"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(r.Queries) != 3 {
+		t.Fatalf("Queries = %v, want all 3 kept -- none of these carry the marker as a real label matcher", r.Queries)
+	}
+}

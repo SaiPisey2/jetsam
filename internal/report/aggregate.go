@@ -72,11 +72,18 @@ stream aggregation), never as a drop added to a scrape config.`
 // on it, its raw and aggregated series counts, the labels kept and the
 // labels dropped, the operator and range function, the rendered recording
 // rule, and each consumer with its query before and after -- then every
-// refusal, the way Scan lists a blocked rule. See notAppliedNotice's own
-// doc comment for why that line comes first and unconditionally, and
-// writeFinding for why a caveat comes right after the metric's own headline
-// numbers rather than at the end.
-func Aggregate(w io.Writer, findings []AggregateFinding, refusals []aggregate.Refusal) {
+// withheld proposal and every refusal, the way Scan lists a blocked rule.
+// See notAppliedNotice's own doc comment for why that line comes first and
+// unconditionally, and writeFinding for why a caveat comes right after the
+// metric's own headline numbers rather than at the end.
+//
+// withheld is printed even when findings has nothing in it: a run that
+// found several candidates and withheld every one of them (an
+// unmeasurable proposal, one already recorded by an existing rule, a
+// saving below the configured minimum) must not read, to something
+// piping only stdout, as indistinguishably clean as a run with no
+// candidates at all.
+func Aggregate(w io.Writer, findings []AggregateFinding, withheld []string, refusals []aggregate.Refusal) {
 	fmt.Fprintln(w, notAppliedNotice)
 	fmt.Fprintln(w)
 
@@ -85,6 +92,16 @@ func Aggregate(w io.Writer, findings []AggregateFinding, refusals []aggregate.Re
 	}
 	for _, f := range findings {
 		writeFinding(w, f)
+	}
+
+	if len(withheld) > 0 {
+		fmt.Fprintf(w, "withheld %d proposal(s):\n", len(withheld))
+		for _, wh := range withheld {
+			// wh can embed remote-sourced text (a metric name, a rule
+			// group or name) the same way a refusal's Reason can.
+			fmt.Fprintf(w, "  - %s\n", safe.Text(wh))
+		}
+		fmt.Fprintln(w)
 	}
 
 	if len(refusals) > 0 {
@@ -119,7 +136,13 @@ func writeFinding(w io.Writer, f AggregateFinding) {
 	if len(p.Keep) > 0 {
 		keep = strings.Join(p.Keep, ", ")
 	}
-	fmt.Fprintf(w, "  keeps: %s\n", keep)
+	// keep and f.Rule are not reachable with hostile content through this
+	// command today (label names come off an already-parsed PromQL query,
+	// and f.Rule is jetsam's own rendered YAML), but Aggregate is exported
+	// and every other remote-sourced field in this function already goes
+	// through safe.Text -- a caller two packages away should not have to
+	// know which fields are the exception.
+	fmt.Fprintf(w, "  keeps: %s\n", safe.Text(keep))
 	// jetsam has no way to name which OTHER labels the raw series carry --
 	// only that they do not survive the collapse -- so this states the
 	// fact it actually has rather than inventing a label list it does not.
@@ -133,7 +156,7 @@ func writeFinding(w io.Writer, f AggregateFinding) {
 
 	fmt.Fprintln(w, "  rule:")
 	for _, line := range strings.Split(strings.TrimRight(f.Rule, "\n"), "\n") {
-		fmt.Fprintf(w, "    %s\n", line)
+		fmt.Fprintf(w, "    %s\n", safe.Text(line))
 	}
 
 	if len(f.Consumers) == 0 {

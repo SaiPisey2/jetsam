@@ -300,3 +300,64 @@ func (c *Client) QueryJobsFor(ctx context.Context, metric string) ([]string, err
 	}
 	return jobs, nil
 }
+
+// CountSeriesBy returns how many distinct series collapsing metric down to
+// the labels in keep would produce: an instant query
+// count(count by (<keep>) ({__name__="<metric>", __ignore_usage__=""})).
+// aggregate needs this to measure whether a proposed collapse would
+// actually save any series, and by how much, before ever printing a
+// number jetsam has not obtained.
+//
+// This goes through c.get the same way every other call in this file
+// does, rather than building its own http.Client and decode loop: c.get
+// is what applies maxResponseBytes, and -- the reason this exists as a
+// Client method instead of being built inline wherever it is needed --
+// what unwraps a *url.Error and substitutes safeURL() so a credential
+// never reaches stderr or CI output (see safeURL's own comment and
+// TestGetErrorNeverEchoesUserinfoOrQueryString). A caller re-implementing
+// this loop for itself gets none of that for free, and silently loses it
+// the moment this package's own request-building changes.
+//
+// keep's label names are interpolated directly into the query text, not
+// quoted -- there is no PromQL syntax for a quoted label NAME the way %q
+// quotes metric's VALUE -- so a label name that is not a valid PromQL
+// identifier makes the built query fail to parse. That failure surfaces
+// as an ordinary error from c.get (Prometheus answers with status
+// "error"), not a fabricated count: every keep label this is ever called
+// with in this codebase comes from corpus.LabelsNeeded, which only ever
+// collects grouping and matcher names off an already-parsed query, so
+// this is a defensive floor for a caller this repo does not have today,
+// not a path anything here can currently reach.
+func (c *Client) CountSeriesBy(ctx context.Context, metric string, keep []string) (int, error) {
+	by := "()"
+	if len(keep) > 0 {
+		by = "(" + strings.Join(keep, ", ") + ")"
+	}
+	query := fmt.Sprintf(`count(count by %s ({__name__=%q, %s=""}))`, by, metric, IgnoreUsageLabel)
+
+	var data struct {
+		Result []struct {
+			Value [2]json.RawMessage `json:"value"`
+		} `json:"result"`
+	}
+	q := url.Values{"query": []string{query}}
+	if err := c.get(ctx, "/api/v1/query", q, &data); err != nil {
+		return 0, err
+	}
+	if len(data.Result) != 1 {
+		return 0, fmt.Errorf("count series by %v for %s: instant query returned %d result(s), want exactly 1", keep, metric, len(data.Result))
+	}
+	// Prometheus's instant-query API encodes a sample's value as
+	// [timestamp, "value string"] -- the value itself is a JSON string,
+	// not a bare number, so it is decoded as one and parsed rather than
+	// unmarshalled directly into a float64.
+	var s string
+	if err := json.Unmarshal(data.Result[0].Value[1], &s); err != nil {
+		return 0, fmt.Errorf("count series by %v for %s: decode value: %w", keep, metric, err)
+	}
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("count series by %v for %s: parse value %q: %w", keep, metric, s, err)
+	}
+	return int(n), nil
+}

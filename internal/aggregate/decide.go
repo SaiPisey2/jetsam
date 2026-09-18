@@ -51,16 +51,21 @@ type Proposal struct {
 	Consumers []Consumer
 	// Caveats names something Decide judged safe to propose anyway, but
 	// that the person approving it should see before acting on the
-	// numbers. Today the only source is corpus.FromLog: a query the
-	// query log recorded is a historical event, not a standing consumer
-	// -- it ran once, possibly weeks ago, and its label requirements
-	// already entered need's union in corpus.Build, so the safety proof
-	// this package exists to make is untouched by it. What it costs is
-	// only the guarantee that RE-RUNNING that exact query later returns
-	// the same numbers, which is the operator's call to make once this
-	// is advisory-only and nothing gets applied without them reading it
-	// first -- unlike corpus.FromDashboard, which keeps reading for as
-	// long as the dashboard exists and stays a hard refusal in refuse().
+	// numbers. Today the only source is corpus.FromLog: the query log
+	// selects on the httpRequest marker alone (see querylog's own
+	// comment on that choice), which cannot distinguish a genuine
+	// one-off read from a dashboard or API client re-running the same
+	// query on a schedule -- exactly the population an install with
+	// query_log.path set and grafana.url unset relies on the log to
+	// cover. What the log DOES prove is that the query's label
+	// requirements already entered need's union in corpus.Build, so the
+	// safety proof this package exists to make is untouched by it; what
+	// it does NOT prove is that nothing keeps re-running it. That
+	// uncertainty is the operator's call to make once this is
+	// advisory-only and nothing gets applied without them reading it
+	// first -- unlike corpus.FromDashboard, which jetsam KNOWS keeps
+	// reading for as long as the dashboard exists, and stays a hard
+	// refusal in refuse().
 	Caveats []string
 }
 
@@ -86,8 +91,9 @@ type Refusal struct {
 // dashboard jetsam cannot rewrite reads it, it is not itself a recording
 // rule's output, and every consumer agrees on both the label set and the
 // operator. A metric a logged query also read is still proposed -- see
-// Proposal.Caveats -- because that query is a historical event, not a
-// standing consumer the way a dashboard is.
+// Proposal.Caveats -- because jetsam cannot tell whether that read was a
+// one-off or a dashboard or API client that keeps re-running it, the way
+// jetsam KNOWS a dashboard does.
 //
 // A metric with no Needs entry is skipped, not refused: absence means
 // nothing in the corpus touches it at all, which is the drop path's
@@ -142,14 +148,14 @@ func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[str
 		var caveats []string
 		if c.UsedBy[m.Name]&corpus.FromLog != 0 {
 			// See Proposal.Caveats' own doc comment for why this is a
-			// caveat, not a refusal: the query log records what someone
-			// ran once, not what keeps running, and its label
-			// requirements are already folded into need above -- what is
-			// NOT proven is that re-running that exact query later still
-			// returns what it did.
-			caveats = append(caveats, "queried ad hoc within the query log's window: jetsam cannot rewrite a "+
-				"query it only saw in a log, and whoever ran it will find their saved query no longer returns "+
-				"what it did once this collapses the raw series")
+			// caveat, not a refusal: its label requirements are already
+			// folded into need above, and what is NOT known -- not "known
+			// to be a one-off", the query log cannot say either way -- is
+			// whether something keeps re-running it.
+			caveats = append(caveats, "read by a query in the query log within its window: jetsam cannot rewrite "+
+				"a query it only saw in a log, and cannot tell a one-off read from a dashboard or API client "+
+				"that re-runs it -- if it does, that read will stop returning what it did once this collapses "+
+				"the raw series")
 		}
 
 		proposals = append(proposals, Proposal{
@@ -239,16 +245,17 @@ func refuse(metric string, need corpus.MetricNeed, c corpus.Corpus, dashboardCon
 	}
 	// corpus.FromLog is deliberately NOT checked here. A dashboard keeps
 	// reading for as long as it exists and jetsam cannot edit Grafana, so
-	// it stays a hard refusal above -- but a query the query log recorded
-	// is a historical event, not a standing consumer: it ran once,
-	// possibly weeks ago, and its label requirements already entered
-	// need's union in corpus.Build, so the safety proof this function
-	// exists to make does not depend on it. What a logged reader costs is
-	// only the guarantee that re-running that exact query later returns
-	// the same numbers -- under this package's advisory-only contract
-	// (nothing is ever applied without a human reading it first), that is
-	// the operator's call to make with the fact in front of them, so
-	// Decide records it on Proposal.Caveats instead of refusing here.
+	// it stays a hard refusal above -- but the query log cannot tell a
+	// genuine one-off read from a dashboard or API client re-running the
+	// same query on a schedule (it selects on the httpRequest marker
+	// alone), and its label requirements already entered need's union in
+	// corpus.Build, so the safety proof this function exists to make does
+	// not depend on which of those a logged read actually was. What is
+	// NOT known is whether something keeps re-running it -- under this
+	// package's advisory-only contract (nothing is ever applied without a
+	// human reading it first), that uncertainty is the operator's call to
+	// make with the fact in front of them, so Decide records it on
+	// Proposal.Caveats instead of refusing here.
 	if need.All {
 		// need.All means jetsam's requirement is "every label must survive",
 		// which is NOT the same claim as "some consumer needs every label":

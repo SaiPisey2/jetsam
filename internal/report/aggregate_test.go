@@ -17,7 +17,7 @@ import (
 // bill of health.
 func TestAggregateAlwaysSaysNothingIsApplied(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, nil, nil)
+	Aggregate(&b, nil, nil, nil)
 	out := b.String()
 	if !strings.Contains(out, "Nothing here is applied") {
 		t.Fatalf("report does not say nothing is applied when there is nothing to report:\n%s", out)
@@ -36,7 +36,7 @@ func TestAggregateAlwaysSaysNothingIsApplied(t *testing.T) {
 // there was "nothing" to report alongside it.
 func TestAggregateSaysNothingIsAppliedWhenEveryMetricIsRefused(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, nil, []aggregate.Refusal{{Metric: "m_total", Reason: "some consumer needs every label"}})
+	Aggregate(&b, nil, nil, []aggregate.Refusal{{Metric: "m_total", Reason: "some consumer needs every label"}})
 	out := b.String()
 	if !strings.Contains(out, "Nothing here is applied") {
 		t.Fatalf("report drops the not-applied notice when every metric was refused:\n%s", out)
@@ -48,7 +48,7 @@ func TestAggregateSaysNothingIsAppliedWhenEveryMetricIsRefused(t *testing.T) {
 // there next to the metric it names.
 func TestAggregateListsRefusalsWithReasons(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, nil, []aggregate.Refusal{
+	Aggregate(&b, nil, nil, []aggregate.Refusal{
 		{Metric: "http_requests_total", Reason: "read by a dashboard jetsam cannot rewrite"},
 	})
 	out := b.String()
@@ -87,7 +87,7 @@ func sampleFinding() AggregateFinding {
 // kept, the operator, and the rendered recording rule.
 func TestAggregateStatesTheSeriesCountsLabelsAndOperator(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil)
+	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil, nil)
 	out := b.String()
 
 	for _, want := range []string{"http_requests_total", "400", "12", "path", "sum", "path:http_requests_total:sum"} {
@@ -108,7 +108,7 @@ func TestAggregateShowsACaveatProminently(t *testing.T) {
 	f.Proposal.Caveats = []string{"queried ad hoc within the query log's window: jetsam cannot rewrite a query it only saw in a log"}
 
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{f}, nil)
+	Aggregate(&b, []AggregateFinding{f}, nil, nil)
 	out := b.String()
 
 	if !strings.Contains(out, "query log's window") {
@@ -127,7 +127,7 @@ func TestAggregateShowsACaveatProminently(t *testing.T) {
 // not gain a spurious one.
 func TestAggregateWithoutACaveatPrintsNone(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil)
+	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil, nil)
 	if strings.Contains(b.String(), "CAVEAT") {
 		t.Errorf("report shows a caveat for a proposal that carries none:\n%s", b.String())
 	}
@@ -137,7 +137,7 @@ func TestAggregateWithoutACaveatPrintsNone(t *testing.T) {
 // kept labels alone that everything else about the metric is gone.
 func TestAggregateNamesWhatIsRemoved(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil)
+	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil, nil)
 	out := b.String()
 	if !strings.Contains(out, "drop") {
 		t.Errorf("report does not say which labels are removed:\n%s", out)
@@ -147,7 +147,7 @@ func TestAggregateNamesWhatIsRemoved(t *testing.T) {
 // TestAggregateShowsARewrittenConsumerBeforeAndAfter.
 func TestAggregateShowsARewrittenConsumerBeforeAndAfter(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil)
+	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil, nil)
 	out := b.String()
 	if !strings.Contains(out, "sum by (path) (http_requests_total) > 100") {
 		t.Errorf("report does not show the consumer's original query:\n%s", out)
@@ -164,7 +164,7 @@ func TestAggregateShowsARewrittenConsumerBeforeAndAfter(t *testing.T) {
 // aggregation is safe when it is not.
 func TestAggregateReportsADeclinedConsumerRatherThanOmittingIt(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil)
+	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil, nil)
 	out := b.String()
 	if !strings.Contains(out, "r2") {
 		t.Fatalf("report omits the declined consumer entirely:\n%s", out)
@@ -178,7 +178,7 @@ func TestAggregateReportsADeclinedConsumerRatherThanOmittingIt(t *testing.T) {
 }
 
 // TestAggregatePartiallyRewrittenConsumerShowsBothTheRewriteAndTheDecline
-// pins the case a code reviewer flagged as the one most likely to mislead:
+// pins the shape most likely to mislead a reader of this report:
 // RewriteConsumer can rewrite one aggregate over a metric and decline a
 // different aggregate over the SAME metric in the same expression --
 // `sum by (path) (rate(m_total[5m])) + min by (path) (rate(m_total[5m]))`
@@ -203,7 +203,7 @@ func TestAggregatePartiallyRewrittenConsumerShowsBothTheRewriteAndTheDecline(t *
 		}},
 	}
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{finding}, nil)
+	Aggregate(&b, []AggregateFinding{finding}, nil, nil)
 	out := b.String()
 
 	if !strings.Contains(out, "path:m_total:sum_rate5m + min by (path) (rate(m_total[5m]))") {
@@ -223,7 +223,7 @@ func TestAggregatePartiallyRewrittenConsumerShowsBothTheRewriteAndTheDecline(t *
 func TestAggregateSanitizesRemoteSourcedText(t *testing.T) {
 	const hostile = "m\x1b[2KFAKE"
 	var b bytes.Buffer
-	Aggregate(&b, nil, []aggregate.Refusal{{Metric: hostile, Reason: "some consumer needs every label"}})
+	Aggregate(&b, nil, nil, []aggregate.Refusal{{Metric: hostile, Reason: "some consumer needs every label"}})
 	out := b.String()
 	if strings.ContainsRune(out, 0x1b) {
 		t.Errorf("report contains a raw ESC byte:\n%q", out)

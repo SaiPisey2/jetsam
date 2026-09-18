@@ -4,14 +4,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -96,6 +92,37 @@ func gather(ctx context.Context, cfg config.Config, cl *promapi.Client, getenv f
 		}
 	}
 	return src, nil
+}
+
+// buildCorpus runs the preamble every subcommand needs before it can say
+// anything about an install: read the TSDB status within ctx's deadline,
+// build the inventory from it, gather() every configured evidence source,
+// and fold it into a corpus. scan, propose and aggregate all start here
+// rather than each repeating the same five calls, so the three can never
+// quietly diverge on what the corpus says about the same install -- which
+// matters most for aggregate and propose, since a difference between them
+// would mean one of the two is simply wrong about the evidence.
+//
+// names is returned alongside inv and src, not left for a caller to
+// re-derive from inv.Metrics, because aggregate needs it again afterward
+// (to resolve dashboard and rule consumers) and re-deriving it a second
+// time is exactly the kind of copy-paste this function exists to remove
+// the first instance of.
+func buildCorpus(ctx context.Context, cfg config.Config, cl *promapi.Client, getenv func(string) string) (inv inventory.Inventory, names []string, src corpus.Sources, cor corpus.Corpus, err error) {
+	status, err := cl.TSDBStatus(ctx, cfg.Prometheus.MetricLimit)
+	if err != nil {
+		return inventory.Inventory{}, nil, corpus.Sources{}, corpus.Corpus{}, err
+	}
+	inv = inventory.Build(status)
+	names = make([]string, 0, len(inv.Metrics))
+	for _, m := range inv.Metrics {
+		names = append(names, m.Name)
+	}
+	src, err = gather(ctx, cfg, cl, getenv, names)
+	if err != nil {
+		return inventory.Inventory{}, nil, corpus.Sources{}, corpus.Corpus{}, err
+	}
+	return inv, names, src, corpus.Build(src, names), nil
 }
 
 // jobResolveWorkers bounds how many QueryJobsFor calls resolveJobs runs at
@@ -233,21 +260,10 @@ func runScan(args []string) {
 	defer cancel()
 
 	cl := promapi.New(cfg.Prometheus.URL, cfg.Prometheus.Timeout)
-	status, err := cl.TSDBStatus(ctx, cfg.Prometheus.MetricLimit)
+	inv, _, _, cor, err := buildCorpus(ctx, cfg, cl, os.Getenv)
 	if err != nil {
 		fail(err)
 	}
-
-	inv := inventory.Build(status)
-	names := make([]string, 0, len(inv.Metrics))
-	for _, m := range inv.Metrics {
-		names = append(names, m.Name)
-	}
-	src, err := gather(ctx, cfg, cl, os.Getenv, names)
-	if err != nil {
-		fail(err)
-	}
-	cor := corpus.Build(src, names)
 	report.Scan(os.Stdout, inv, cor, verdict.Compute(inv, cor))
 }
 
@@ -337,23 +353,11 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	defer cancel()
 
 	cl := promapi.New(cfg.Prometheus.URL, cfg.Prometheus.Timeout)
-	status, err := cl.TSDBStatus(ctx, cfg.Prometheus.MetricLimit)
+	inv, _, _, cor, err := buildCorpus(ctx, cfg, cl, getenv)
 	if err != nil {
 		logErr(err)
 		return 1
 	}
-
-	inv := inventory.Build(status)
-	names := make([]string, 0, len(inv.Metrics))
-	for _, m := range inv.Metrics {
-		names = append(names, m.Name)
-	}
-	src, err := gather(ctx, cfg, cl, getenv, names)
-	if err != nil {
-		logErr(err)
-		return 1
-	}
-	cor := corpus.Build(src, names)
 	res := verdict.Compute(inv, cor)
 	// DashboardsMissing and QueryLogMissing must widen this the same as a
 	// blocked rule does: -include-unreferenced only accepts the gap in
@@ -725,24 +729,11 @@ func aggregateCmd(args []string, stdout, stderr io.Writer, getenv func(string) s
 	defer cancel()
 
 	cl := promapi.New(cfg.Prometheus.URL, cfg.Prometheus.Timeout)
-	status, err := cl.TSDBStatus(ctx, cfg.Prometheus.MetricLimit)
+	inv, names, src, cor, err := buildCorpus(ctx, cfg, cl, getenv)
 	if err != nil {
 		logErr(err)
 		return 1
 	}
-
-	inv := inventory.Build(status)
-	names := make([]string, 0, len(inv.Metrics))
-	for _, m := range inv.Metrics {
-		names = append(names, m.Name)
-	}
-
-	src, err := gather(ctx, cfg, cl, getenv, names)
-	if err != nil {
-		logErr(err)
-		return 1
-	}
-	cor := corpus.Build(src, names)
 
 	proposals, refusals := aggregate.Decide(inv, cor, dashboardConsumers(src.Dashboards, names))
 
@@ -756,17 +747,37 @@ func aggregateCmd(args []string, stdout, stderr io.Writer, getenv func(string) s
 	// whatever happens to remain.
 	measureCtx, measureCancel := context.WithTimeout(context.Background(), cfg.Prometheus.Timeout)
 	defer measureCancel()
-	hc := &http.Client{Timeout: cfg.Prometheus.Timeout}
 
 	var findings []report.AggregateFinding
 	var withheld []string
 	for _, p := range proposals {
-		kept, err := measureKeptSeries(measureCtx, cfg.Prometheus.URL, hc, p.Metric, p.Keep)
+		// A rule that already records under p.RuleName is not a consumer
+		// to rewrite, it is the proposal's own name collision: RuleName
+		// follows the standard level:metric:operation convention, so a
+		// pre-existing recording rule that already performs exactly this
+		// aggregation very often carries the identical name Decide just
+		// generated. Printing the proposal anyway would ask the reader to
+		// create a rule that already exists, and to rewrite that rule's
+		// own expr to reference its own record name -- Prometheus accepts
+		// `record: X` / `expr: X` and evaluates it to its own previous
+		// value forever. Withheld here, with the reason, rather than
+		// reported as an ordinary consumer: omitting it would hide the
+		// collision as well as fail to flag it.
+		if r, ok := alreadyRecordedBy(p.RuleName, src.Rules); ok {
+			withheld = append(withheld, fmt.Sprintf(
+				"%s: this aggregation is already recorded by rule %s/%s; naming it again would ask you to point that rule's own expr at its own record name",
+				p.Metric, r.Group, r.Name))
+			continue
+		}
+
+		kept, err := cl.CountSeriesBy(measureCtx, p.Metric, p.Keep)
 		if err != nil {
 			// A proposal whose measurement query fails is withheld, not
 			// reported with a missing or zero number: see the brief this
-			// command implements. Said on stderr, the same way gather()
-			// reports a degraded source, rather than silently dropped.
+			// command implements. A label name jetsam cannot use unquoted
+			// in this query (invalid PromQL, or one that changes what the
+			// query means) fails exactly this way -- CountSeriesBy's
+			// error names it -- rather than measuring the wrong thing.
 			withheld = append(withheld, fmt.Sprintf("%s: could not measure the aggregated series count: %v", p.Metric, err))
 			continue
 		}
@@ -797,14 +808,7 @@ func aggregateCmd(args []string, stdout, stderr io.Writer, getenv func(string) s
 		findings = append(findings, report.AggregateFinding{Proposal: p, Rule: ruleYAML, Consumers: consumers})
 	}
 
-	if len(withheld) > 0 {
-		fmt.Fprintf(stderr, "warning: %d proposal(s) withheld:\n", len(withheld))
-		for _, w := range withheld {
-			fmt.Fprintln(stderr, "  - "+safe.Text(w))
-		}
-	}
-
-	report.Aggregate(stdout, findings, refusals)
+	report.Aggregate(stdout, findings, withheld, refusals)
 	return 0
 }
 
@@ -893,6 +897,21 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
+// alreadyRecordedBy returns the recording rule, if any, whose own record
+// name equals ruleName -- see aggregateCmd's own comment on why finding
+// one means the whole proposal must be withheld rather than printed. Only
+// a recording rule is checked: an alerting rule's Name is its alert name,
+// a distinct field from what it would record, so it cannot collide with a
+// record name the way a recording rule's own Name can.
+func alreadyRecordedBy(ruleName string, rules []promapi.Rule) (promapi.Rule, bool) {
+	for _, r := range rules {
+		if r.Type == "recording" && r.Name == ruleName {
+			return r, true
+		}
+	}
+	return promapi.Rule{}, false
+}
+
 // rulesReading returns, as aggregate.Consumer values, every rule in rules
 // whose query touches metric -- what fills aggregate.Proposal.Consumers,
 // which Decide itself leaves nil because Corpus carries no rule list (see
@@ -945,93 +964,6 @@ func buildConsumerFinding(c aggregate.Consumer, p aggregate.Proposal) report.Con
 		return report.ConsumerFinding{Consumer: c, Rewritten: c.Query, Declined: err.Error()}
 	}
 	return report.ConsumerFinding{Consumer: c, Rewritten: rewritten, Declined: declined}
-}
-
-// aggregateQueryMaxBytes bounds the instant-query response
-// measureKeptSeries reads, mirroring promapi's own maxResponseBytes: a
-// malformed or hostile response must produce a clear error, never a
-// silently truncated decode that reads as "this aggregate has fewer series
-// than it actually does".
-const aggregateQueryMaxBytes = 64 << 20
-
-// measureKeptSeries issues one instant query counting how many series
-// aggregating metric down to keep would produce:
-// count(count by (<keep>) ({__name__="<metric>", __ignore_usage__=""})). It
-// cannot reuse promapi.Client for this -- QueryJobsFor answers a different
-// question and its request-building is unexported -- so it mirrors that
-// idiom directly: the metric name is passed through %q, never concatenated
-// bare, because a metric name is untrusted input (Prometheus 3 permits
-// UTF-8 names) and this repo has already shipped one injection through
-// exactly this kind of interpolation. When keep is empty the clause is
-// "by ()", which collapses every series to one -- correct for a consumer
-// that aggregates the metric down to a single number.
-//
-// promapi.IgnoreUsageLabel marks this query as jetsam's own tooling, not
-// real usage, for the same reason promapi.QueryJobsFor's own query carries
-// it: Prometheus logs every /api/v1/query call, and without the marker
-// running `aggregate` once would make every metric it measured look, on
-// the NEXT run, like it is read by a `count` consumer -- the tool
-// poisoning the evidence it depends on. The matcher is inert; see the
-// constant's own doc comment for why no result changes.
-func measureKeptSeries(ctx context.Context, baseURL string, hc *http.Client, metric string, keep []string) (int, error) {
-	by := "()"
-	if len(keep) > 0 {
-		by = "(" + strings.Join(keep, ", ") + ")"
-	}
-	query := fmt.Sprintf(`count(count by %s ({__name__=%q, %s=""}))`, by, metric, promapi.IgnoreUsageLabel)
-
-	u := strings.TrimRight(baseURL, "/") + "/api/v1/query?" + (url.Values{"query": {query}}).Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return 0, fmt.Errorf("build measurement query for %s: %w", metric, err)
-	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("measure %s: %w", metric, err)
-	}
-	defer resp.Body.Close()
-
-	lr := &io.LimitedReader{R: resp.Body, N: aggregateQueryMaxBytes + 1}
-	body, err := io.ReadAll(lr)
-	if err != nil {
-		return 0, fmt.Errorf("read measurement response for %s: %w", metric, err)
-	}
-	if lr.N == 0 {
-		return 0, fmt.Errorf("measurement response for %s exceeds %d byte limit", metric, aggregateQueryMaxBytes)
-	}
-
-	var env struct {
-		Status string `json:"status"`
-		Data   struct {
-			Result []struct {
-				Value [2]json.RawMessage `json:"value"`
-			} `json:"result"`
-		} `json:"data"`
-		ErrorType string `json:"errorType"`
-		Error     string `json:"error"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return 0, fmt.Errorf("decode measurement response for %s: %w", metric, err)
-	}
-	if env.Status != "success" {
-		return 0, fmt.Errorf("measure %s: %s: %s", metric, env.ErrorType, env.Error)
-	}
-	if len(env.Data.Result) != 1 {
-		return 0, fmt.Errorf("measure %s: instant query returned %d result(s), want exactly 1", metric, len(env.Data.Result))
-	}
-	// Prometheus's instant-query API encodes a sample's value as
-	// [timestamp, "value string"] -- the value itself is a JSON string, not
-	// a bare number, so it is decoded as one and parsed rather than
-	// unmarshalled directly into a float64.
-	var s string
-	if err := json.Unmarshal(env.Data.Result[0].Value[1], &s); err != nil {
-		return 0, fmt.Errorf("decode measurement value for %s: %w", metric, err)
-	}
-	n, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse measurement value %q for %s: %w", s, metric, err)
-	}
-	return int(n), nil
 }
 
 // diffContext is how many unchanged lines surround a change in the

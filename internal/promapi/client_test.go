@@ -294,6 +294,92 @@ func TestQueryJobsForQuotesAMetricNameThatIsAPromQLKeyword(t *testing.T) {
 	}
 }
 
+func TestCountSeriesByReturnsTheMeasuredCount(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantQuery := `count(count by (path) ({__name__="http_requests_total", __ignore_usage__=""}))`
+		if got := r.URL.Query().Get("query"); got != wantQuery {
+			t.Errorf("query = %q, want %q", got, wantQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"5"]}]}}`))
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, 5*time.Second).CountSeriesBy(context.Background(), "http_requests_total", []string{"path"})
+	if err != nil {
+		t.Fatalf("CountSeriesBy: %v", err)
+	}
+	if got != 5 {
+		t.Errorf("CountSeriesBy = %d, want 5", got)
+	}
+}
+
+// TestCountSeriesByWithEmptyKeepUsesABareByClause: an empty keep means
+// every consumer collapses the metric to one series -- "by ()", not the
+// grouping clause omitted, since aggregate.Decide's own Proposal.Keep
+// documents empty as a real case rather than an oversight.
+func TestCountSeriesByWithEmptyKeepUsesABareByClause(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantQuery := `count(count by () ({__name__="m_total", __ignore_usage__=""}))`
+		if got := r.URL.Query().Get("query"); got != wantQuery {
+			t.Errorf("query = %q, want %q", got, wantQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"1"]}]}}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL, 5*time.Second).CountSeriesBy(context.Background(), "m_total", nil); err != nil {
+		t.Fatalf("CountSeriesBy: %v", err)
+	}
+}
+
+func TestCountSeriesByRejectsAnErrorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"status":"error","errorType":"bad_data","error":"invalid query"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL, 5*time.Second).CountSeriesBy(context.Background(), "m", []string{"path"}); err == nil {
+		t.Fatal("CountSeriesBy succeeded on a status:\"error\" body, want an error")
+	}
+}
+
+func TestCountSeriesByRejectsMoreThanOneResult(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[
+			{"metric":{"a":"1"},"value":[1,"3"]},
+			{"metric":{"a":"2"},"value":[1,"4"]}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL, 5*time.Second).CountSeriesBy(context.Background(), "m", []string{"path"}); err == nil {
+		t.Fatal("CountSeriesBy succeeded with 2 results from an instant query that should return exactly 1, want an error")
+	}
+}
+
+// TestCountSeriesByNeverEchoesUserinfoOrQueryString is
+// TestGetErrorNeverEchoesUserinfoOrQueryString's twin for CountSeriesBy
+// specifically: this method used to build its own http.Client and decode
+// loop rather than going through c.get, which bypassed safeURL and put a
+// dial failure's full request URL -- credential included -- on stderr.
+// Routing through c.get is what restores the guarantee; this pins that it
+// actually does.
+func TestCountSeriesByNeverEchoesUserinfoOrQueryString(t *testing.T) {
+	_, err := New("http://user:sekrit@127.0.0.1:1", 2*time.Second).CountSeriesBy(context.Background(), "m", []string{"path"})
+	if err == nil {
+		t.Fatal("CountSeriesBy succeeded against an unreachable address, want an error")
+	}
+	if strings.Contains(err.Error(), "sekrit") {
+		t.Errorf("error leaks userinfo: %v", err)
+	}
+	if strings.Contains(err.Error(), "query=") {
+		t.Errorf("error leaks the query string: %v", err)
+	}
+}
+
 func TestGetRejectsAnOversizedBodyRatherThanTruncating(t *testing.T) {
 	// A body over the limit must produce a clear error, never a silently
 	// truncated decode: a short read would look like "this Prometheus has

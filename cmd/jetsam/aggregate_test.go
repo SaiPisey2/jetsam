@@ -22,6 +22,14 @@ import (
 // the measurement query with keptSeries. It writes a jetsam.yaml that never
 // sets prometheus_file: aggregate does not edit a scrape config and must
 // not require one.
+//
+// The rule is deliberately named something OTHER than the
+// level:metric:operation name Decide would generate for this exact
+// collapse (path:http_requests_total:sum) -- that collision is its own
+// scenario, pinned separately by
+// TestAggregateWithholdsWhenARuleAlreadyRecordsTheProposedName, and every
+// OTHER test in this file needs a genuine, non-colliding consumer to
+// exercise what it actually tests.
 func aggregateFixture(t *testing.T, rawSeries, keptSeries int, extraYAML string) (cfgPath string) {
 	t.Helper()
 	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +40,7 @@ func aggregateFixture(t *testing.T, rawSeries, keptSeries int, extraYAML string)
 				{"name":"http_requests_total","value":` + itoa(rawSeries) + `}]}}`))
 		case "/api/v1/rules":
 			w.Write([]byte(`{"status":"success","data":{"groups":[{"name":"g","rules":[
-				{"name":"path:http_requests_total:sum","type":"recording","query":"sum by (path) (http_requests_total)"}
+				{"name":"RequestsByPathAggregate","type":"recording","query":"sum by (path) (http_requests_total)"}
 			]}]}}`))
 		case "/api/v1/query":
 			q := r.URL.Query().Get("query")
@@ -132,7 +140,8 @@ func TestAggregateProposesACollapsibleMetric(t *testing.T) {
 // TestAggregateWithholdsAMetricThatSavesNoSeries is the mutation-pinning
 // test for the KeptSeries >= RawSeries withholding: the measured aggregate
 // has exactly as many series as the raw metric, so collapsing it saves
-// nothing and it must not be named.
+// nothing and it must not be proposed -- though the withheld block does,
+// correctly, still name it as the one thing this run withheld.
 func TestAggregateWithholdsAMetricThatSavesNoSeries(t *testing.T) {
 	cfgPath := aggregateFixture(t, 400, 400, "")
 	var stdout, stderr bytes.Buffer
@@ -141,16 +150,20 @@ func TestAggregateWithholdsAMetricThatSavesNoSeries(t *testing.T) {
 		t.Fatalf("aggregateCmd = %d: stderr=%s", rc, stderr.String())
 	}
 	out := stdout.String()
-	if strings.Contains(out, "http_requests_total") {
-		t.Errorf("metric that saves no series was named:\n%s", out)
+	if strings.Contains(out, "kept (saves") {
+		t.Errorf("metric that saves no series was proposed:\n%s", out)
 	}
 	if !strings.Contains(out, "nothing to collapse") {
 		t.Errorf("output does not say there was nothing to collapse:\n%s", out)
 	}
+	if !strings.Contains(out, "withheld 1 proposal(s)") || !strings.Contains(out, "http_requests_total") {
+		t.Errorf("output does not name the withheld metric:\n%s", out)
+	}
 }
 
 // TestAggregateWithholdsBelowTheConfiguredMinimum: a real but small saving,
-// below aggregate.min_series_saved, must not be named either.
+// below aggregate.min_series_saved, must not be proposed either, though it
+// is still named in the withheld block.
 func TestAggregateWithholdsBelowTheConfiguredMinimum(t *testing.T) {
 	cfgPath := aggregateFixture(t, 400, 350, "aggregate:\n  min_series_saved: 100\n")
 	var stdout, stderr bytes.Buffer
@@ -159,8 +172,11 @@ func TestAggregateWithholdsBelowTheConfiguredMinimum(t *testing.T) {
 		t.Fatalf("aggregateCmd = %d: stderr=%s", rc, stderr.String())
 	}
 	out := stdout.String()
-	if strings.Contains(out, "http_requests_total") {
-		t.Errorf("metric saving only 50 series was named against a minimum of 100:\n%s", out)
+	if strings.Contains(out, "kept (saves") {
+		t.Errorf("metric saving only 50 series was proposed against a minimum of 100:\n%s", out)
+	}
+	if !strings.Contains(out, "withheld 1 proposal(s)") {
+		t.Errorf("output does not name the withheld count:\n%s", out)
 	}
 }
 
@@ -175,7 +191,7 @@ func TestAggregateWithholdsAnUnmeasurableProposal(t *testing.T) {
 			w.Write([]byte(`{"status":"success","data":{"seriesCountByMetricName":[{"name":"http_requests_total","value":400}]}}`))
 		case "/api/v1/rules":
 			w.Write([]byte(`{"status":"success","data":{"groups":[{"name":"g","rules":[
-				{"name":"path:http_requests_total:sum","type":"recording","query":"sum by (path) (http_requests_total)"}
+				{"name":"RequestsByPathAggregate","type":"recording","query":"sum by (path) (http_requests_total)"}
 			]}]}}`))
 		case "/api/v1/query":
 			w.Write([]byte(`{"status":"error","errorType":"timeout","error":"query timed out"}`))
@@ -198,8 +214,11 @@ func TestAggregateWithholdsAnUnmeasurableProposal(t *testing.T) {
 	if strings.Contains(out, "path:http_requests_total:sum") || strings.Contains(out, "400 series") {
 		t.Errorf("an unmeasured proposal was printed with a number jetsam never obtained:\n%s", out)
 	}
-	if !strings.Contains(stderr.String(), "http_requests_total") {
-		t.Errorf("stderr does not say which metric could not be measured:\n%s", stderr.String())
+	if !strings.Contains(out, "http_requests_total") {
+		t.Errorf("report does not say which metric could not be measured:\n%s", out)
+	}
+	if !strings.Contains(out, "withheld 1 proposal(s)") {
+		t.Errorf("report does not name the withheld count:\n%s", out)
 	}
 }
 
@@ -216,7 +235,7 @@ func TestAggregateReportsADeclinedConsumerEndToEnd(t *testing.T) {
 			w.Write([]byte(`{"status":"success","data":{"seriesCountByMetricName":[{"name":"http_requests_total","value":400}]}}`))
 		case "/api/v1/rules":
 			w.Write([]byte(`{"status":"success","data":{"groups":[{"name":"g","rules":[
-				{"name":"path:http_requests_total:sum","type":"recording","query":"sum by (path) (http_requests_total)"},
+				{"name":"RequestsByPathAggregate","type":"recording","query":"sum by (path) (http_requests_total)"},
 				{"name":"NarrowAlert","type":"alerting","query":"sum by (path) (http_requests_total{job=\"api\"}) > 100"}
 			]}]}}`))
 		case "/api/v1/query":
@@ -245,6 +264,66 @@ func TestAggregateReportsADeclinedConsumerEndToEnd(t *testing.T) {
 	}
 }
 
+// TestAggregateWithholdsWhenARuleAlreadyRecordsTheProposedName pins the
+// name-collision defect: RuleName follows the standard
+// level:metric:operation convention, so a pre-existing recording rule
+// performing exactly this aggregation will very often already carry the
+// name Decide would generate. Printing that proposal anyway would ask the
+// reader to create a rule that already exists and to point that rule's own
+// expr at its own record name -- Prometheus accepts `record: X` / `expr:
+// X` and evaluates it to its own previous value forever. The proposal must
+// be withheld, with a reason naming the colliding rule, not printed as an
+// ordinary consumer (which would hide the collision instead of flagging
+// it).
+func TestAggregateWithholdsWhenARuleAlreadyRecordsTheProposedName(t *testing.T) {
+	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/status/tsdb":
+			w.Write([]byte(`{"status":"success","data":{"seriesCountByMetricName":[{"name":"http_requests_total","value":400}]}}`))
+		case "/api/v1/rules":
+			// The record name here is exactly what aggregate.RuleName
+			// would generate for this metric collapsed to (path) under
+			// sum -- see decide.go's RuleName -- which is the whole point
+			// of this fixture.
+			w.Write([]byte(`{"status":"success","data":{"groups":[{"name":"g","rules":[
+				{"name":"path:http_requests_total:sum","type":"recording","query":"sum by (path) (http_requests_total)"}
+			]}]}}`))
+		case "/api/v1/query":
+			w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"12"]}]}}`))
+		default:
+			t.Errorf("unexpected request to %s", r.URL.Path)
+		}
+	}))
+	defer prom.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "jetsam.yaml")
+	os.WriteFile(cfgPath, []byte("prometheus:\n  url: "+prom.URL+"\n  timeout: 5s\n"), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	rc := aggregateCmd([]string{"-config", cfgPath}, &stdout, &stderr, noEnv)
+	if rc != 0 {
+		t.Fatalf("aggregateCmd = %d: stderr=%s", rc, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "kept (saves") {
+		t.Fatalf("a proposal colliding with an existing rule's own record name was printed as a real proposal:\n%s", out)
+	}
+	if !strings.Contains(out, "withheld 1 proposal(s)") {
+		t.Errorf("output does not name the withheld count:\n%s", out)
+	}
+	if !strings.Contains(out, "already recorded by rule g/path:http_requests_total:sum") {
+		t.Errorf("output does not name the colliding rule:\n%s", out)
+	}
+	// The point of withholding rather than omitting: the collision itself
+	// must be visible, not silently absorbed into an ordinary consumer
+	// listing.
+	if strings.Contains(out, "consumer rule g/path:http_requests_total:sum") {
+		t.Errorf("the colliding rule was reported as an ordinary consumer instead of withheld:\n%s", out)
+	}
+}
+
 // TestAggregateRunTwiceAgainstTheSameLogProducesTheSameResult is the
 // regression test for the class of defect this round fixes: Prometheus logs
 // every /api/v1/query call it answers, including jetsam's own measurement
@@ -266,7 +345,7 @@ func TestAggregateRunTwiceAgainstTheSameLogProducesTheSameResult(t *testing.T) {
 			w.Write([]byte(`{"status":"success","data":{"seriesCountByMetricName":[{"name":"http_requests_total","value":400}]}}`))
 		case "/api/v1/rules":
 			w.Write([]byte(`{"status":"success","data":{"groups":[{"name":"g","rules":[
-				{"name":"path:http_requests_total:sum","type":"recording","query":"sum by (path) (http_requests_total)"}
+				{"name":"RequestsByPathAggregate","type":"recording","query":"sum by (path) (http_requests_total)"}
 			]}]}}`))
 		case "/api/v1/query":
 			// Prometheus itself would write exactly this query string to
@@ -366,6 +445,43 @@ func TestRulesReadingFindsEveryRuleTouchingTheMetric(t *testing.T) {
 	}
 }
 
+// TestAlreadyRecordedByFindsAMatchingRecordingRule is a direct unit test
+// of the helper aggregateCmd uses to withhold a proposal that would collide
+// with a rule's own existing record name.
+func TestAlreadyRecordedByFindsAMatchingRecordingRule(t *testing.T) {
+	rules := []promapi.Rule{
+		{Group: "g", Name: "path:m_total:sum", Type: "recording", Query: "sum by (path) (m_total)"},
+	}
+	r, ok := alreadyRecordedBy("path:m_total:sum", rules)
+	if !ok || r.Group != "g" || r.Name != "path:m_total:sum" {
+		t.Errorf("alreadyRecordedBy = %+v, %v, want the matching rule", r, ok)
+	}
+}
+
+// TestAlreadyRecordedByIgnoresAnAlertOfTheSameName: an alerting rule's Name
+// is its alert name, a different field from what it would record, so it
+// cannot collide with a record name the way a recording rule's own Name
+// can.
+func TestAlreadyRecordedByIgnoresAnAlertOfTheSameName(t *testing.T) {
+	rules := []promapi.Rule{
+		{Group: "g", Name: "path:m_total:sum", Type: "alerting", Query: "sum by (path) (m_total) > 100"},
+	}
+	if _, ok := alreadyRecordedBy("path:m_total:sum", rules); ok {
+		t.Error("alreadyRecordedBy matched an alerting rule, want recording rules only")
+	}
+}
+
+// TestAlreadyRecordedByFindsNothingWhenNoRuleMatches is the negative case:
+// a differently-named rule must not be reported as a collision.
+func TestAlreadyRecordedByFindsNothingWhenNoRuleMatches(t *testing.T) {
+	rules := []promapi.Rule{
+		{Group: "g", Name: "some_other_name", Type: "recording", Query: "sum by (path) (m_total)"},
+	}
+	if _, ok := alreadyRecordedBy("path:m_total:sum", rules); ok {
+		t.Error("alreadyRecordedBy matched a differently-named rule")
+	}
+}
+
 // TestWithholdReasonCatchesKeptSeriesAtLeastRawSeries is the isolated
 // mutation-pinning test for the first withholding check: with minSaved
 // pinned at 0 -- a value config.Load itself can never produce, since it
@@ -399,8 +515,8 @@ func TestWithholdReasonAllowsAGenuineSaving(t *testing.T) {
 }
 
 // TestBuildConsumerFindingHandlesAPartialRewrite is the direct unit test of
-// the glue between aggregateCmd and emit.RewriteConsumer, using the exact
-// case a code reviewer flagged: a consumer's expression contains one
+// the glue between aggregateCmd and emit.RewriteConsumer, using the shape
+// most likely to mislead: a consumer's expression contains one
 // aggregate that matches the proposal (sum) and a second, over the same
 // metric, that does not (min). RewriteConsumer rewrites the first and
 // declines the second, and buildConsumerFinding must carry both through --
