@@ -1,8 +1,10 @@
 package report
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
@@ -152,5 +154,62 @@ func TestScanDoesNotWarnWhenNotTruncated(t *testing.T) {
 
 	if strings.Contains(out, "WARNING") {
 		t.Errorf("report warns about truncation although the inventory was not truncated:\n%s", out)
+	}
+}
+
+func TestScanStatesTheLogSpanAgainstTheMinimum(t *testing.T) {
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "m", Series: 1}}, TotalSeries: 1}
+	c := corpus.Corpus{
+		Used: map[string]bool{}, Produced: map[string]bool{},
+		LogRead: true, LogSpan: 3 * time.Hour, LogQualifies: false,
+	}
+	var b bytes.Buffer
+	Scan(&b, inv, c, verdict.Compute(inv, c))
+	out := b.String()
+	if !strings.Contains(out, "3h") {
+		t.Errorf("report does not state the log span:\n%s", out)
+	}
+	if !strings.Contains(out, "not long enough") {
+		t.Errorf("report does not say the span was insufficient:\n%s", out)
+	}
+}
+
+func TestScanSaysWhenDashboardEvidenceIsMissing(t *testing.T) {
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "m", Series: 1}}, TotalSeries: 1}
+	c := corpus.Corpus{
+		Used: map[string]bool{}, Produced: map[string]bool{},
+		DashboardsConfigured: true, DashboardsReachable: false,
+	}
+	var b bytes.Buffer
+	Scan(&b, inv, c, verdict.Compute(inv, c))
+	if !strings.Contains(b.String(), "could not be fetched") {
+		t.Errorf("report does not say dashboard evidence was unavailable:\n%s", b.String())
+	}
+}
+
+// TestScanSaysDashboardsMissingIsWhyNothingIsDroppable is the correction to
+// Task 6's brief: the aggregate "Droppable none" switch must not fall
+// through to the "every metric is referenced" message when the real reason
+// is that dashboard evidence was configured but could not be fetched.
+// Nothing is blocked, no metric is graded unreferenced (there is no query
+// log at all here, so ordinarily that branch would fire first) -- the
+// corpus is empty of any other explanation except the missing dashboards.
+func TestScanSaysDashboardsMissingIsWhyNothingIsDroppable(t *testing.T) {
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "used_metric", Series: 400}}, TotalSeries: 400}
+	c := corpus.Corpus{
+		Used: map[string]bool{"used_metric": true}, Produced: map[string]bool{},
+		DashboardsConfigured: true, DashboardsReachable: false,
+	}
+	res := verdict.Compute(inv, c)
+
+	var b bytes.Buffer
+	Scan(&b, inv, c, res)
+	out := b.String()
+
+	if !strings.Contains(out, "Droppable  none -- dashboard evidence was configured but could not be fetched") {
+		t.Errorf("report does not blame missing dashboard evidence for nothing being droppable:\n%s", out)
+	}
+	if strings.Contains(out, "every metric is referenced by a rule or was read within the query-log window") {
+		t.Errorf("report falls through to the misleading default explanation:\n%s", out)
 	}
 }

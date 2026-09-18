@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"text/tabwriter"
+	"time"
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
@@ -35,6 +36,14 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 		// fixed. Only print the query-log explanation when it is actually
 		// why nothing is droppable.
 		switch {
+		// Checked first: dashboard evidence configured but unfetchable
+		// withholds every drop regardless of whether a rule or the query
+		// log would otherwise have accounted for everything. "No dashboard
+		// reads it" and "nobody looked" produce identical numbers, so this
+		// must never fall through to a message that claims the second when
+		// the truth is the first.
+		case res.DashboardsMissing:
+			fmt.Fprintln(w, "Droppable  none -- dashboard evidence was configured but could not be fetched, so every drop is withheld")
 		case len(res.Blocked) > 0:
 			fmt.Fprintf(w, "Droppable  none -- %d rule(s) could not be read; a blocked rule may reference "+
 				"anything, so every drop is withheld until it is fixed\n", len(res.Blocked))
@@ -48,6 +57,23 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 	// sourced from the remote Prometheus: sanitize before printing.
 	for _, b := range res.Blocked {
 		fmt.Fprintf(w, "Blocked    %s\n", safe.Text(b))
+	}
+	if c.DashboardsConfigured {
+		if c.DashboardsReachable {
+			fmt.Fprintf(w, "Dashboards %d read from Grafana\n", c.Dashboards)
+		} else {
+			fmt.Fprintln(w, "Dashboards configured but could not be fetched -- every drop is withheld")
+		}
+	}
+	if c.LogRead {
+		if c.LogQualifies {
+			fmt.Fprintf(w, "Query log  covers %s\n", c.LogSpan.Round(time.Hour))
+		} else {
+			fmt.Fprintf(w, "Query log  covers %s -- not long enough to license a drop\n", c.LogSpan.Round(time.Hour))
+		}
+	}
+	for _, p := range c.DashboardPanelsUnparsed {
+		fmt.Fprintf(w, "Unparsed   %s\n", safe.Text(p))
 	}
 	fmt.Fprintln(w)
 

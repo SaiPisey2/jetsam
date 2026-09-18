@@ -16,12 +16,52 @@ import (
 	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/emit"
 	"github.com/SaiPisey2/jetsam/internal/forge"
+	"github.com/SaiPisey2/jetsam/internal/grafana"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
 	"github.com/SaiPisey2/jetsam/internal/promapi"
+	"github.com/SaiPisey2/jetsam/internal/querylog"
 	"github.com/SaiPisey2/jetsam/internal/report"
 	"github.com/SaiPisey2/jetsam/internal/safe"
 	"github.com/SaiPisey2/jetsam/internal/verdict"
 )
+
+// gather collects every evidence source the config enables. The Grafana
+// token comes from the environment only -- a flag lands in ps and shell
+// history, and a config file gets committed.
+func gather(ctx context.Context, cfg config.Config, cl *promapi.Client, getenv func(string) string, allMetrics []string) (corpus.Sources, error) {
+	rules, err := cl.AlertingAndRecordingRules(ctx)
+	if err != nil {
+		return corpus.Sources{}, err
+	}
+	src := corpus.Sources{Rules: rules}
+
+	if cfg.Grafana.URL != "" {
+		src.DashboardsConfigured = true
+		g := grafana.New(cfg.Grafana.URL, getenv("GRAFANA_TOKEN"), cfg.Prometheus.Timeout)
+		dash, derr := g.Dashboards(ctx)
+		if derr != nil {
+			// Not fatal: scan is still useful. But every drop is withheld,
+			// because "no dashboard reads it" and "nobody looked" are
+			// opposite claims with identical numbers.
+			fmt.Fprintf(os.Stderr, "warning: grafana configured but unreadable, every drop withheld: %v\n", derr)
+		} else {
+			src.Dashboards = dash
+			src.DashboardsReachable = true
+		}
+	}
+
+	if cfg.QueryLog.Path != "" {
+		reading, rerr := querylog.Read(cfg.QueryLog.Path)
+		if rerr != nil {
+			return corpus.Sources{}, fmt.Errorf("read query log: %w", rerr)
+		}
+		src.QueryLog = reading
+		if reading != nil {
+			src.LogQualifies = reading.Span >= cfg.QueryLog.MinWindow
+		}
+	}
+	return src, nil
+}
 
 // jobResolveWorkers bounds how many QueryJobsFor calls resolveJobs runs at
 // once. promapi.Client holds only a base URL string and an *http.Client,
@@ -154,23 +194,17 @@ func runScan(args []string) {
 	if err != nil {
 		fail(err)
 	}
-	rules, err := cl.AlertingAndRecordingRules(ctx)
-	if err != nil {
-		fail(err)
-	}
 
 	inv := inventory.Build(status)
 	names := make([]string, 0, len(inv.Metrics))
 	for _, m := range inv.Metrics {
 		names = append(names, m.Name)
 	}
-	cor := corpus.Build(corpus.Sources{Rules: rules}, names)
-	// v0.1 never reads a query log, so the evidence for "nobody queried
-	// this" does not exist yet; cfg.HaveQueryLog() only reports that a
-	// path is configured in YAML, not that anything was read from it.
-	// Wiring the configured path into Sources here would let one line of
-	// YAML mark metrics droppable on rule evidence alone. This wiring
-	// becomes real in v0.3 when log ingestion lands.
+	src, err := gather(ctx, cfg, cl, os.Getenv, names)
+	if err != nil {
+		fail(err)
+	}
+	cor := corpus.Build(src, names)
 	report.Scan(os.Stdout, inv, cor, verdict.Compute(inv, cor))
 }
 
@@ -265,25 +299,26 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 		logErr(err)
 		return 1
 	}
-	rules, err := cl.AlertingAndRecordingRules(ctx)
-	if err != nil {
-		logErr(err)
-		return 1
-	}
 
 	inv := inventory.Build(status)
 	names := make([]string, 0, len(inv.Metrics))
 	for _, m := range inv.Metrics {
 		names = append(names, m.Name)
 	}
-	cor := corpus.Build(corpus.Sources{Rules: rules}, names)
-	// Same reasoning as runScan, and just as deliberate here: v0.1 has no
-	// query log evidence, so passing cfg.HaveQueryLog() would let a line of
-	// YAML mark metrics droppable on rule evidence alone. On a default
-	// install this means propose finds nothing droppable and says so below,
-	// rather than silently deleting data on rule evidence.
+	src, err := gather(ctx, cfg, cl, getenv, names)
+	if err != nil {
+		logErr(err)
+		return 1
+	}
+	cor := corpus.Build(src, names)
 	res := verdict.Compute(inv, cor)
-	blocked := len(res.Blocked) > 0
+	// DashboardsMissing must widen this the same as a blocked rule does:
+	// -include-unreferenced only accepts the gap in evidence that comes
+	// from having no query log, never the gap that comes from Grafana
+	// being configured and unreachable. Checking only res.Blocked here
+	// would let that flag override withholding that verdict.Compute
+	// already enforced on every verdict's Droppable field.
+	blocked := len(res.Blocked) > 0 || res.DashboardsMissing
 
 	var eligible []verdict.Verdict
 	for _, v := range res.Verdicts {
@@ -407,7 +442,10 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	if len(drops) == 0 {
 		fmt.Fprintln(stdout, "propose: nothing to propose.")
 		switch {
-		case blocked:
+		case res.DashboardsMissing:
+			fmt.Fprintln(stdout, "dashboard evidence was configured but could not be fetched, so every drop is "+
+				"withheld until Grafana is reachable again. See `jetsam scan` for detail.")
+		case len(res.Blocked) > 0:
 			fmt.Fprintf(stdout, "%d rule(s) could not be read; a blocked rule may reference anything, "+
 				"so every drop is withheld until it is fixed. See `jetsam scan` for which.\n", len(res.Blocked))
 		default:
@@ -418,10 +456,24 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 				printUnresolved()
 			}
 			if len(declined) == 0 && len(unresolved) == 0 {
-				if *includeUnreferenced {
+				switch {
+				case *includeUnreferenced:
 					fmt.Fprintln(stdout, "-include-unreferenced is set, but no rule-unreferenced metric was found either -- "+
 						"there is nothing to widen the proposal with.")
-				} else {
+				case cor.LogRead && cor.LogQualifies:
+					// A qualifying query log IS configured here -- unlike the
+					// case below -- so the honest reason nothing is eligible
+					// is that every metric is already accounted for by a
+					// rule, a dashboard, or the log itself, not that evidence
+					// is missing.
+					fmt.Fprintln(stdout, "every metric is already referenced by a rule or dashboard, or was read "+
+						"within the query log's window -- there is nothing unread to propose dropping.")
+				case cor.LogRead && !cor.LogQualifies:
+					fmt.Fprintf(stdout, "query_log.path is configured, but its log only covers %s -- not long enough "+
+						"to license a drop -- so jetsam cannot tell \"no rule mentions this\" apart from \"nobody reads "+
+						"this\". Let it cover more of query_log.min_window, or pass -include-unreferenced to propose "+
+						"dropping rule-unreferenced metrics on faith instead.\n", cor.LogSpan.Round(time.Hour))
+				default:
 					fmt.Fprintln(stdout, "no query log is configured, so jetsam cannot tell \"no rule mentions this\" apart from "+
 						"\"nobody reads this\" -- set query_log.path to make a metric eligible on evidence, or pass "+
 						"-include-unreferenced to propose dropping rule-unreferenced metrics on faith instead.")
@@ -493,7 +545,7 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	// one number that matters, not "how many metrics were dropped".
 	bodyRes := res
 	bodyRes.Blocked = append(append(append([]string(nil), res.Blocked...), declined...), unresolvedMsgs...)
-	title, body := emit.Body(drops, bodyRes, cor.Queries, inv, cfg.Pricing.PerSeriesMonth)
+	title, body := emit.Body(drops, bodyRes, cor, inv, cfg.Pricing.PerSeriesMonth)
 	fmt.Fprintf(stdout, "%s\n\n%s\n\n", title, body)
 
 	if !*apply {

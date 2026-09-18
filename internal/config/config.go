@@ -19,8 +19,19 @@ type Config struct {
 		// Prometheus has ten metrics" and mark nothing else as existing.
 		MetricLimit int `yaml:"metric_limit"`
 	} `yaml:"prometheus"`
+	Grafana struct {
+		// URL is optional. The credential comes from $GRAFANA_TOKEN and is
+		// deliberately not a field here: a config file gets committed.
+		URL string `yaml:"url"`
+	} `yaml:"grafana"`
 	QueryLog struct {
+		// Path is a glob. Nobody retains a 30-day query log as one file; it
+		// is rotated, and often gzipped.
 		Path string `yaml:"path"`
+		// MinWindow is how long the log must cover before its silence is
+		// evidence. A Go duration string -- "720h", never "30d", which is
+		// not a Go duration unit and fails to unmarshal.
+		MinWindow time.Duration `yaml:"min_window"`
 	} `yaml:"query_log"`
 	// PrometheusFile is the path, inside a git checkout, of the scrape
 	// config to edit. propose refuses to run without it.
@@ -38,13 +49,22 @@ const defaultYAML = `prometheus:
   # without it.
   metric_limit: 5000
 
-# Optional. Without a query log jetsam can see what your RULES read but not
-# what people read, so every unread metric is reported as "unreferenced"
-# and nothing is proposed for dropping. Point this at the file Prometheus
-# writes with --query.log-file to upgrade those to "unqueried" and make
-# them eligible.
+# Optional. Reading dashboards widens the corpus, so fewer metrics look
+# unread. The credential comes from $GRAFANA_TOKEN, never from this file.
+grafana:
+  url: ""
+
+# Optional. Without a query log jetsam can see what your RULES and DASHBOARDS
+# read but not what people read ad hoc, so every unread metric is reported as
+# "unreferenced" and nothing is proposed for dropping. Point path at the file
+# Prometheus writes with global.query_log_file -- a glob, since the log is
+# rotated -- to upgrade those to "unqueried" and make them eligible.
 query_log:
   path: ""
+  # How long the log must cover before its silence counts as evidence. A Go
+  # duration string: "720h" is 30 days. "30d" is NOT valid and will fail to
+  # parse -- d is not a Go duration unit.
+  min_window: 720h
 
 # Required by "jetsam propose". Path, inside a git checkout, of the scrape
 # config propose edits to add the drop rules it proposes.
@@ -93,9 +113,8 @@ func Load(path string) (Config, error) {
 	if c.Prometheus.MetricLimit == 0 {
 		c.Prometheus.MetricLimit = 5000
 	}
+	if c.QueryLog.MinWindow == 0 {
+		c.QueryLog.MinWindow = 720 * time.Hour
+	}
 	return c, nil
 }
-
-// HaveQueryLog reports whether real read traffic is available. It is the
-// difference between "no rule mentions it" and "nobody read it".
-func (c Config) HaveQueryLog() bool { return c.QueryLog.Path != "" }

@@ -5,7 +5,9 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
 	"github.com/SaiPisey2/jetsam/internal/verdict"
 )
@@ -24,7 +26,7 @@ func TestBodyTotalClampsRatherThanOverflowsNegative(t *testing.T) {
 		{Metric: "a", Series: huge, Job: "api"},
 		{Metric: "b", Series: huge, Job: "api"},
 	}
-	title, _ := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1}, 0)
+	title, _ := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1}, 0)
 	if strings.Contains(title, "-") {
 		t.Errorf("title went negative on overflow: %q", title)
 	}
@@ -35,7 +37,7 @@ func TestBodyTotalClampsRatherThanOverflowsNegative(t *testing.T) {
 }
 
 func TestBodyWarnsThatHistoryIsNotRecoverable(t *testing.T) {
-	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 	// Reverting the commit restores collection but not the history that was
 	// never written. It is the one mistake a reviewer cannot undo, so it
 	// belongs near the top.
@@ -45,14 +47,14 @@ func TestBodyWarnsThatHistoryIsNotRecoverable(t *testing.T) {
 }
 
 func TestBodyOmitsMoneyWithoutARate(t *testing.T) {
-	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 	if strings.Contains(body, "$") {
 		t.Errorf("body invented a cost with no rate configured:\n%s", body)
 	}
 }
 
 func TestBodyShowsTheArithmeticWhenGivenARate(t *testing.T) {
-	_, body := Body([]Drop{{Metric: "x", Series: 1000, Job: "api"}}, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 10000}, 0.0008)
+	_, body := Body([]Drop{{Metric: "x", Series: 1000, Job: "api"}}, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 10000}, 0.0008)
 	if !strings.Contains(body, "0.0008") {
 		t.Errorf("body states a cost without the rate it used:\n%s", body)
 	}
@@ -60,7 +62,7 @@ func TestBodyShowsTheArithmeticWhenGivenARate(t *testing.T) {
 
 func TestBodyCountsWhatWasDeclined(t *testing.T) {
 	res := verdict.Result{Blocked: []string{"rule g/Broken: parse query"}}
-	_, body := Body(nil, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body(nil, res, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 	if !strings.Contains(body, "Broken") {
 		t.Errorf("body hides what jetsam declined to touch:\n%s", body)
 	}
@@ -88,7 +90,7 @@ func countTableRows(body string) int {
 
 func TestBodyEscapesPipeInMetricName(t *testing.T) {
 	drops := []Drop{{Metric: "bad|metric", Series: 5, Job: "api"}}
-	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 
 	// header + separator + exactly one data row for one drop.
 	if got, want := countTableRows(body), 3; got != want {
@@ -104,7 +106,7 @@ func TestBodyEscapesPipeInMetricName(t *testing.T) {
 
 func TestBodyEscapesBacktickInMetricName(t *testing.T) {
 	drops := []Drop{{Metric: "weird`metric", Series: 5, Job: "api"}}
-	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 
 	if got, want := countTableRows(body), 3; got != want {
 		t.Errorf("table rows = %d, want %d (a backtick broke the table):\n%s", got, want, body)
@@ -119,7 +121,7 @@ func TestBodyEscapesBacktickInMetricName(t *testing.T) {
 
 func TestBodyRendersANSIEscapeVisibly(t *testing.T) {
 	drops := []Drop{{Metric: "up\x1b[31mFAKE\x1b[0m", Series: 5, Job: "api"}}
-	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 
 	if strings.ContainsRune(body, 0x1b) {
 		t.Errorf("raw ESC byte survived into the body:\n%q", body)
@@ -131,7 +133,7 @@ func TestBodyRendersANSIEscapeVisibly(t *testing.T) {
 
 func TestBodyRendersNewlineInMetricNameVisibly(t *testing.T) {
 	drops := []Drop{{Metric: "up\ninjected", Series: 5, Job: "api"}}
-	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 
 	if got, want := countTableRows(body), 3; got != want {
 		t.Errorf("table rows = %d, want %d (a raw newline forged a row):\n%s", got, want, body)
@@ -150,7 +152,7 @@ func TestBodyStatesTheGradeADropRestsOn(t *testing.T) {
 	res := verdict.Result{Verdicts: []verdict.Verdict{
 		{Metric: "x", Series: 10, Grade: verdict.GradeUnreferenced, Droppable: true},
 	}}
-	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 
 	if !strings.Contains(body, "unreferenced") {
 		t.Errorf("body does not state the grade the drop rests on:\n%s", body)
@@ -167,7 +169,7 @@ func TestBodyDoesNotWarnAboutUnreferencedWhenEveryDropIsFullyEvidenced(t *testin
 	res := verdict.Result{Verdicts: []verdict.Verdict{
 		{Metric: "x", Series: 10, Grade: verdict.GradeUnqueried, Droppable: true},
 	}}
-	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 	if strings.Contains(body, "-include-unreferenced") {
 		t.Errorf("body warns about -include-unreferenced although every drop rests on unqueried grade:\n%s", body)
 	}
@@ -175,7 +177,7 @@ func TestBodyDoesNotWarnAboutUnreferencedWhenEveryDropIsFullyEvidenced(t *testin
 
 func TestBodyEscapesBlockedEntries(t *testing.T) {
 	res := verdict.Result{Blocked: []string{"rule g/Broken\x1b[31m: parse query"}}
-	_, body := Body(nil, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body(nil, res, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 	if strings.ContainsRune(body, 0x1b) {
 		t.Errorf("raw ESC byte survived from a blocked entry into the body:\n%q", body)
 	}
@@ -243,7 +245,7 @@ func TestBodyNeutralisesMarkdownAndHTMLInMetricName(t *testing.T) {
 	for i, shape := range mdInjectionShapes {
 		t.Run(subtestName(i, shape), func(t *testing.T) {
 			drops := []Drop{{Metric: shape, Series: 5, Job: "api"}}
-			_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+			_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 			assertNoLiveMarkupOrHTML(t, shape, body)
 		})
 	}
@@ -253,7 +255,7 @@ func TestBodyNeutralisesMarkdownAndHTMLInJobName(t *testing.T) {
 	for i, shape := range mdInjectionShapes {
 		t.Run(subtestName(i, shape), func(t *testing.T) {
 			drops := []Drop{{Metric: "x", Series: 5, Job: shape}}
-			_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+			_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 			assertNoLiveMarkupOrHTML(t, shape, body)
 		})
 	}
@@ -264,7 +266,7 @@ func TestBodyNeutralisesMarkdownAndHTMLInBlockedEntries(t *testing.T) {
 		t.Run(subtestName(i, shape), func(t *testing.T) {
 			drops := []Drop{{Metric: "x", Series: 5, Job: "api"}}
 			res := verdict.Result{Blocked: []string{shape}}
-			_, body := Body(drops, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+			_, body := Body(drops, res, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 			assertNoLiveMarkupOrHTML(t, shape, body)
 		})
 	}
@@ -320,7 +322,7 @@ func TestBodyDefeatsAutolinkInMetricName(t *testing.T) {
 	for i, shape := range autolinkShapes {
 		t.Run(subtestName(i, shape), func(t *testing.T) {
 			drops := []Drop{{Metric: shape, Series: 5, Job: "api"}}
-			_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+			_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 			assertAutolinkDefeated(t, shape, body)
 		})
 	}
@@ -330,7 +332,7 @@ func TestBodyDefeatsAutolinkInJobName(t *testing.T) {
 	for i, shape := range autolinkShapes {
 		t.Run(subtestName(i, shape), func(t *testing.T) {
 			drops := []Drop{{Metric: "x", Series: 5, Job: shape}}
-			_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+			_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 			assertAutolinkDefeated(t, shape, body)
 		})
 	}
@@ -341,7 +343,7 @@ func TestBodyDefeatsAutolinkInBlockedEntries(t *testing.T) {
 		t.Run(subtestName(i, shape), func(t *testing.T) {
 			drops := []Drop{{Metric: "x", Series: 5, Job: "api"}}
 			res := verdict.Result{Blocked: []string{shape}}
-			_, body := Body(drops, res, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+			_, body := Body(drops, res, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 			assertAutolinkDefeated(t, shape, body)
 		})
 	}
@@ -366,7 +368,7 @@ func TestBodyLeavesOrdinaryNamesReadable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		drops := []Drop{{Metric: tc.name, Series: 5, Job: "api"}}
-		_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+		_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 		if !strings.Contains(body, tc.want) {
 			t.Errorf("ordinary metric name %q: body does not contain %q:\n%s", tc.name, tc.want, body)
 		}
@@ -384,7 +386,7 @@ func TestBodyLeavesOrdinaryNamesReadable(t *testing.T) {
 // here would drift and this test would catch it.
 func TestBodyPercentageUsesTotalSeriesNotASum(t *testing.T) {
 	drops := []Drop{{Metric: "x", Series: 10, Job: "api"}}
-	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 	if !strings.Contains(body, "1.0%") {
 		t.Errorf("body does not state the percentage computed against TotalSeries:\n%s", body)
 	}
@@ -397,7 +399,7 @@ func TestBodyPercentageUsesTotalSeriesNotASum(t *testing.T) {
 func TestBodyWarnsWhenTheInventoryWasTruncated(t *testing.T) {
 	drops := []Drop{{Metric: "x", Series: 10, Job: "api"}}
 	inv := inventory.Inventory{TotalSeries: 15777, MetricLimit: 40, NameCount: 1374, Truncated: true}
-	_, body := Body(drops, verdict.Result{}, 200, inv, 0)
+	_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inv, 0)
 	if !strings.Contains(body, "[!WARNING]") {
 		t.Errorf("body does not carry a warning block at all:\n%s", body)
 	}
@@ -413,7 +415,7 @@ func TestBodyWarnsWhenTheInventoryWasTruncated(t *testing.T) {
 func TestBodyDoesNotWarnAboutTruncationWhenThereIsNone(t *testing.T) {
 	drops := []Drop{{Metric: "x", Series: 10, Job: "api"}}
 	inv := inventory.Inventory{TotalSeries: 1000, Truncated: false}
-	_, body := Body(drops, verdict.Result{}, 200, inv, 0)
+	_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inv, 0)
 	if strings.Contains(body, "truncated") {
 		t.Errorf("body warns about truncation although the inventory was not truncated:\n%s", body)
 	}
@@ -439,7 +441,7 @@ func TestBodyTotalCountsASharedMetricOnce(t *testing.T) {
 		{Metric: "shared_metric", Series: 100, Job: "api"},
 		{Metric: "shared_metric", Series: 100, Job: "batch"},
 	}
-	title, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	title, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 	if !strings.Contains(title, "100 unread series") {
 		t.Errorf("title = %q, want it to count shared_metric once (100), not once per job (200)", title)
 	}
@@ -460,7 +462,7 @@ func TestBodyTotalDoesNotCollapseDistinctMetrics(t *testing.T) {
 		{Metric: "metric_a", Series: 100, Job: "api"},
 		{Metric: "metric_b", Series: 100, Job: "api"},
 	}
-	title, _ := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	title, _ := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 	if !strings.Contains(title, "200 unread series") {
 		t.Errorf("title = %q, want 200 (two distinct metrics must not be collapsed)", title)
 	}
@@ -478,7 +480,7 @@ func TestBodyTotalCountsAMixOfSharedAndSingleJobMetricsOnce(t *testing.T) {
 		{Metric: "solo_1", Series: 50, Job: "a"},
 		{Metric: "solo_2", Series: 25, Job: "b"},
 	}
-	title, _ := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	title, _ := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 	if !strings.Contains(title, "175 unread series") {
 		t.Errorf("title = %q, want 175 (100 once + 50 + 25)", title)
 	}
@@ -503,7 +505,7 @@ func TestBodyPercentageNeverExceedsOneHundred(t *testing.T) {
 	// already counted within -- not 4x that, which is what an undeduplicated
 	// sum across four jobs would need to stay under 100%.
 	inv := inventory.Inventory{TotalSeries: 6500}
-	_, body := Body(drops, verdict.Result{}, 200, inv, 0)
+	_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inv, 0)
 
 	idx := strings.Index(body, "Drops ")
 	if idx < 0 {
@@ -536,7 +538,7 @@ func TestBodyListsASharedMetricUnderEveryJob(t *testing.T) {
 		{Metric: "shared_metric", Series: 100, Job: "api"},
 		{Metric: "shared_metric", Series: 100, Job: "batch"},
 	}
-	_, body := Body(drops, verdict.Result{}, 200, inventory.Inventory{TotalSeries: 1000}, 0)
+	_, body := Body(drops, verdict.Result{}, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
 
 	if !strings.Contains(body, "### job \"api\"") || !strings.Contains(body, "### job \"batch\"") {
 		t.Fatalf("body does not carry a table for both jobs:\n%s", body)
@@ -564,7 +566,7 @@ func TestBodyRendersDeceptiveNamesVisibly(t *testing.T) {
 
 	drops := []Drop{{Metric: metric, Series: 10, Job: job}}
 	res := verdict.Result{Verdicts: []verdict.Verdict{{Metric: metric, Grade: verdict.GradeUnqueried}}}
-	_, body := Body(drops, res, 5, inventory.Inventory{TotalSeries: 100}, 0)
+	_, body := Body(drops, res, corpus.Corpus{Queries: 5}, inventory.Inventory{TotalSeries: 100}, 0)
 
 	for _, r := range []rune{0x202E, 0x202C, 0x200B} {
 		if strings.ContainsRune(body, r) {
@@ -576,5 +578,57 @@ func TestBodyRendersDeceptiveNamesVisibly(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("PR body does not contain %s; want the code point rendered visibly", want)
 		}
+	}
+}
+
+// TestBodyStatesDashboardsRead pins that the PR body, not just the terminal
+// report, says how many dashboards backed the grading -- an approval
+// surface for an irreversible deletion should not require reading the
+// terminal output to know what evidence existed.
+func TestBodyStatesDashboardsRead(t *testing.T) {
+	c := corpus.Corpus{Queries: 5, Dashboards: 3, DashboardsConfigured: true, DashboardsReachable: true}
+	_, body := Body(nil, verdict.Result{}, c, inventory.Inventory{TotalSeries: 100}, 0)
+	if !strings.Contains(body, "3 read from Grafana") {
+		t.Errorf("body does not state how many dashboards were read:\n%s", body)
+	}
+}
+
+// TestBodyWarnsWhenDashboardsUnreachable is the PR-body half of the same
+// correction made to report.Scan: Grafana configured but unfetchable must
+// be stated plainly, not silently absent from the body a human approves.
+func TestBodyWarnsWhenDashboardsUnreachable(t *testing.T) {
+	c := corpus.Corpus{Queries: 5, DashboardsConfigured: true, DashboardsReachable: false}
+	_, body := Body(nil, verdict.Result{}, c, inventory.Inventory{TotalSeries: 100}, 0)
+	if !strings.Contains(body, "could not be fetched") {
+		t.Errorf("body does not say dashboard evidence was unavailable:\n%s", body)
+	}
+}
+
+// TestBodyStatesQueryLogSpan pins that the PR body states the query log's
+// actual coverage, the same fact report.Scan prints on the terminal.
+func TestBodyStatesQueryLogSpan(t *testing.T) {
+	c := corpus.Corpus{Queries: 5, LogRead: true, LogSpan: 400 * time.Hour, LogQualifies: true}
+	_, body := Body(nil, verdict.Result{}, c, inventory.Inventory{TotalSeries: 100}, 0)
+	if !strings.Contains(body, "400h") {
+		t.Errorf("body does not state the query log's span:\n%s", body)
+	}
+}
+
+// TestBodyBoundsUnqueriedClaimByLogWindow pins the brief's Step 5
+// requirement: when a drop rests on "unqueried" grade, the body must state
+// that the claim is bounded by the log's window and name the span --
+// "unqueried" is full confidence only within that window, not an
+// unconditional guarantee.
+func TestBodyBoundsUnqueriedClaimByLogWindow(t *testing.T) {
+	res := verdict.Result{Verdicts: []verdict.Verdict{
+		{Metric: "x", Series: 10, Grade: verdict.GradeUnqueried, Droppable: true},
+	}}
+	c := corpus.Corpus{Queries: 5, LogRead: true, LogSpan: 720 * time.Hour, LogQualifies: true}
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, c, inventory.Inventory{TotalSeries: 1000}, 0)
+	if !strings.Contains(body, "720h") {
+		t.Errorf("body does not name the log's span when bounding the unqueried claim:\n%s", body)
+	}
+	if !strings.Contains(body, "unqueried") {
+		t.Errorf("body does not mention the unqueried grade it is bounding:\n%s", body)
 	}
 }

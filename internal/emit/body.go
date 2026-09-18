@@ -5,7 +5,9 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
 	"github.com/SaiPisey2/jetsam/internal/safe"
 	"github.com/SaiPisey2/jetsam/internal/verdict"
@@ -145,7 +147,7 @@ func mdText(s string) string {
 // true series count (see inventory.Inventory.TotalSeries), and the
 // percentage below is stated against that, never against a sum of only the
 // metrics metric_limit happened to return.
-func Body(drops []Drop, res verdict.Result, queries int, inv inventory.Inventory, perSeriesMonth float64) (string, string) {
+func Body(drops []Drop, res verdict.Result, c corpus.Corpus, inv inventory.Inventory, perSeriesMonth float64) (string, string) {
 	// The headline total counts each METRIC once, not each Drop once. A
 	// metric produced by several jobs (a shared exporter scraped under
 	// more than one job label, most commonly) gets one emit.Drop per job
@@ -185,16 +187,20 @@ func Body(drops []Drop, res verdict.Result, queries int, inv inventory.Inventory
 		gradeOf[v.Metric] = v.Grade
 	}
 	unreferenced := map[string]bool{}
+	unqueried := map[string]bool{}
 	for _, d := range drops {
-		if gradeOf[d.Metric] == verdict.GradeUnreferenced {
+		switch gradeOf[d.Metric] {
+		case verdict.GradeUnreferenced:
 			unreferenced[d.Metric] = true
+		case verdict.GradeUnqueried:
+			unqueried[d.Metric] = true
 		}
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "## jetsam: %d series nothing reads\n\n", total)
-	fmt.Fprintf(&b, "Checked against %d queries read from this Prometheus's own rules. "+
-		"Every metric below is named by none of them.\n\n", queries)
+	fmt.Fprintf(&b, "Checked against %d queries read from this Prometheus's own rules, dashboards and query log. "+
+		"Every metric below is named by none of them.\n\n", c.Queries)
 
 	// The irreversibility warning: near the top, ahead of any numbers, ahead
 	// of the table. Reverting this PR restores collection; it does not
@@ -204,11 +210,54 @@ func Body(drops []Drop, res verdict.Result, queries int, inv inventory.Inventory
 	b.WriteString("> **Reverting this PR restores collection, not history.** Series not written " +
 		"while these rules are live cannot be recovered afterwards. Everything else here is reversible; this is not.\n\n")
 
+	// How much evidence there was, the same three facts report.Scan states
+	// on the terminal: dashboards read (or unreachable), the query log's
+	// span against its minimum, and any dashboard panel jetsam could not
+	// parse. A reviewer approving an irreversible deletion should not have
+	// to take jetsam's grading on faith without knowing what it actually
+	// looked at.
+	if c.DashboardsConfigured {
+		if c.DashboardsReachable {
+			fmt.Fprintf(&b, "Dashboards: %d read from Grafana.\n\n", c.Dashboards)
+		} else {
+			fmt.Fprint(&b, "> [!WARNING]\n> **Grafana is configured but its dashboards could not be fetched.** "+
+				"\"No dashboard reads it\" and \"nobody looked\" are opposite claims with identical numbers, so "+
+				"every drop below is withheld until Grafana is reachable again.\n\n")
+		}
+	}
+	if c.LogRead {
+		if c.LogQualifies {
+			fmt.Fprintf(&b, "Query log: covers %s.\n\n", c.LogSpan.Round(time.Hour))
+		} else {
+			fmt.Fprintf(&b, "Query log: covers %s -- not long enough to license a drop.\n\n", c.LogSpan.Round(time.Hour))
+		}
+	}
+	if len(c.DashboardPanelsUnparsed) > 0 {
+		fmt.Fprintf(&b, "%d dashboard panel(s) could not be parsed and were conservatively marked as reading "+
+			"every metric-shaped token they mention:\n\n", len(c.DashboardPanelsUnparsed))
+		for _, p := range c.DashboardPanelsUnparsed {
+			fmt.Fprintf(&b, "- %s\n", mdText(p))
+		}
+		b.WriteString("\n")
+	}
+
 	if len(unreferenced) > 0 {
 		fmt.Fprintf(&b, "> [!WARNING]\n> **%d metric(s) below rest on \"unreferenced\" grade, not \"unqueried\".** "+
-			"They are not referenced by any rule, but jetsam has no query log configured and therefore cannot see "+
-			"ad-hoc or Grafana Explore queries against them. `-include-unreferenced` was passed, and the operator "+
-			"who ran it has chosen to accept that risk.\n\n", len(unreferenced))
+			"They are not referenced by any rule, but jetsam has no query log configured -- or one configured but "+
+			"not covering the required window -- and therefore cannot see ad-hoc or Grafana Explore queries "+
+			"against them. `-include-unreferenced` was passed, and the operator who ran it has chosen to accept "+
+			"that risk.\n\n", len(unreferenced))
+	}
+
+	if len(unqueried) > 0 {
+		// "unqueried" is the fully-evidenced grade, but the evidence is
+		// still bounded: it only covers the window the log actually spans.
+		// A read that happened before that window, or recurs less often
+		// than it, would not appear in it -- so name the span here rather
+		// than let "unqueried" read as an unconditional guarantee.
+		fmt.Fprintf(&b, "%d metric(s) below rest on \"unqueried\" grade: nothing read them within the "+
+			"**%s** the query log actually covers. A read that happened before that window, or one that "+
+			"recurs less often than that, would not appear in it.\n\n", len(unqueried), c.LogSpan.Round(time.Hour))
 	}
 
 	if inv.Truncated {
