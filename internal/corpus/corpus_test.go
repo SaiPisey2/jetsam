@@ -494,11 +494,42 @@ func TestDashboardsAndLoggedQueriesContributeRequirements(t *testing.T) {
 // and treating them alike would plant the single most permissive
 // MetricNeed -- no label required, every operator safe -- for every metric
 // in the Prometheus, from one unaggregated rule.
-// TestWindowRendersPrometheusDurations pins the six values the sub-project
-// brief calls out by name, and also that each rendering is usable both as a
-// PromQL range (round-tripped through the real parser inside a rate() call)
-// and as a metric-name suffix -- the two places a recording rule name
-// actually puts it.
+func TestANamelessSelectorRefusesEveryMetricItMightTouch(t *testing.T) {
+	all := []string{"m_total", "other_total"}
+	check := func(t *testing.T, c Corpus) {
+		t.Helper()
+		for _, m := range all {
+			n := c.Needs[m]
+			if !n.All {
+				t.Errorf("%s: All = false, want true", m)
+			}
+			if len(n.Blockers) == 0 {
+				t.Errorf("%s: Blockers empty, want a reason recorded", m)
+			}
+		}
+	}
+
+	t.Run("rule", func(t *testing.T) {
+		c := Build(Sources{
+			Rules: []promapi.Rule{{Name: "a", Group: "g", Type: "alerting", Query: `{job="api"} > 5`}},
+		}, all)
+		check(t, c)
+	})
+
+	t.Run("dashboard panel", func(t *testing.T) {
+		c := Build(Sources{
+			Dashboards: []grafana.Dashboard{{UID: "d", Title: "D", Queries: []string{`{job=~"$job"}`}}},
+		}, all)
+		check(t, c)
+	})
+}
+
+// TestWindowRendersPrometheusDurations pins six durations spanning every
+// unit the renderer walks -- minutes, an hour, a sub-minute remainder, a
+// multi-day span, and a sub-second one -- and also that each rendering is
+// usable both as a PromQL range (round-tripped through the real parser
+// inside a rate() call) and as a metric-name suffix -- the two places a
+// recording rule name actually puts it.
 func TestWindowRendersPrometheusDurations(t *testing.T) {
 	metricNameSuffix := regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 	cases := []struct {
@@ -529,11 +560,11 @@ func TestWindowRendersPrometheusDurations(t *testing.T) {
 	}
 }
 
-// This trimming-off-suffixes defect is the one the brief warns against by
-// name: "10m0s" trimmed of "0s" and then "0m" yields "1".
+// "10m0s" trimmed of "0s" and then "0m" yields "1" -- the defect this
+// function's unit-table approach exists to avoid.
 func TestWindowDoesNotTrimSuffixes(t *testing.T) {
 	if got := window(10 * time.Minute); got == "1" {
-		t.Fatalf("window(10m) = %q -- this is the suffix-trimming defect the brief warns against", got)
+		t.Fatalf("window(10m) = %q -- \"10m0s\" trimmed of \"0s\" then \"0m\" yields \"1\", which is this exact defect", got)
 	}
 }
 
@@ -648,32 +679,47 @@ func TestFnsIsNeverEmptyForAnEntryInNeeds(t *testing.T) {
 	})
 }
 
-func TestANamelessSelectorRefusesEveryMetricItMightTouch(t *testing.T) {
-	all := []string{"m_total", "other_total"}
-	check := func(t *testing.T, c Corpus) {
-		t.Helper()
-		for _, m := range all {
-			n := c.Needs[m]
+// TestBlockersNameTheActualCause pins the point of LabelNeed.Blocker: a
+// refusal caused by an unsupported range function, or by a subquery, must
+// carry a reason a reader can act on instead of the bare "some consumer
+// needs every label" that used to be all Decide's refusal sentence had to
+// work with -- which is false for these two, since a real requirement
+// (Required: [path]) was computed before the function/subquery forced All.
+func TestBlockersNameTheActualCause(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "an unsupported range function",
+			query: `sum by (path) (max_over_time(m_total[5m]))`,
+			want:  "max_over_time",
+		},
+		{
+			name:  "a subquery",
+			query: `sum(rate(m_total[5m:1m]))`,
+			want:  "subquery",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Build(Sources{
+				Rules: []promapi.Rule{{Name: "a", Group: "g", Type: "recording", Query: tc.query}},
+			}, []string{"m_total"})
+
+			n := c.Needs["m_total"]
 			if !n.All {
-				t.Errorf("%s: All = false, want true", m)
+				t.Fatalf("All = false, want true")
 			}
-			if len(n.Blockers) == 0 {
-				t.Errorf("%s: Blockers empty, want a reason recorded", m)
+			found := false
+			for _, b := range n.Blockers {
+				if strings.Contains(b, tc.want) {
+					found = true
+				}
 			}
-		}
+			if !found {
+				t.Errorf("Blockers = %v, want one containing %q", n.Blockers, tc.want)
+			}
+		})
 	}
-
-	t.Run("rule", func(t *testing.T) {
-		c := Build(Sources{
-			Rules: []promapi.Rule{{Name: "a", Group: "g", Type: "alerting", Query: `{job="api"} > 5`}},
-		}, all)
-		check(t, c)
-	})
-
-	t.Run("dashboard panel", func(t *testing.T) {
-		c := Build(Sources{
-			Dashboards: []grafana.Dashboard{{UID: "d", Title: "D", Queries: []string{`{job=~"$job"}`}}},
-		}, all)
-		check(t, c)
-	})
 }
