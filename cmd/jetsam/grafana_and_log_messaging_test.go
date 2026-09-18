@@ -202,3 +202,38 @@ func TestProposeNothingToProposeMessageNamesTheActualReason(t *testing.T) {
 		}
 	})
 }
+
+// TestProposeDegradesWhenTheQueryLogCannotBeRead: gather used to return an
+// error when the log could not be read, so one truncated line in a
+// multi-GB rotated set made jetsam exit 1 and do nothing at all. It must
+// degrade exactly as an unreachable Grafana does -- the run still works,
+// the failure is loud, and every drop is withheld including under
+// -include-unreferenced. What it must never do is treat the log as empty:
+// an empty log says nobody queried anything, which licenses dropping
+// everything.
+func TestProposeDegradesWhenTheQueryLogCannotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "queries.log")
+	// A line with no parseable time field: querylog.Read refuses the file
+	// rather than absorbing it, which is the behaviour being degraded from.
+	if err := os.WriteFile(logPath, []byte("not a query log line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := singleMetricFixture(t, "query_log:\n  path: "+logPath+"\n  min_window: 1h\n")
+
+	var stdout, stderr bytes.Buffer
+	rc := proposeCmd([]string{"-config", cfgPath, "-include-unreferenced"}, &stdout, &stderr, noEnv, failProvider(t))
+	if rc != 0 {
+		t.Fatalf("proposeCmd = %d, want 0 -- an unreadable log must not stop the run: stderr=%s", rc, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "orphan_metric_total") {
+		t.Errorf("-include-unreferenced re-widened a metric withheld for an unreadable query log:\n%s", out)
+	}
+	if !strings.Contains(out, "nothing to propose") {
+		t.Errorf("output does not say nothing was proposed:\n%s", out)
+	}
+	if !strings.Contains(out, "could not be read") {
+		t.Errorf("output does not say the query log could not be read:\n%s", out)
+	}
+}

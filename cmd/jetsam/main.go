@@ -43,7 +43,12 @@ func gather(ctx context.Context, cfg config.Config, cl *promapi.Client, getenv f
 			// Not fatal: scan is still useful. But every drop is withheld,
 			// because "no dashboard reads it" and "nobody looked" are
 			// opposite claims with identical numbers.
-			fmt.Fprintf(os.Stderr, "warning: grafana configured but unreadable, every drop withheld: %v\n", derr)
+			// safe.Text: a proxy in front of Grafana can put anything it
+			// likes in a response body, and that body reaches this
+			// string. An ANSI escape here rewrites the terminal line a
+			// human is reading the warning from.
+			fmt.Fprintf(os.Stderr, "warning: grafana configured but unreadable, every drop withheld: %s\n",
+				safe.Text(derr.Error()))
 		} else {
 			src.Dashboards = dash
 			src.DashboardsReachable = true
@@ -53,11 +58,36 @@ func gather(ctx context.Context, cfg config.Config, cl *promapi.Client, getenv f
 	if cfg.QueryLog.Path != "" {
 		reading, rerr := querylog.Read(cfg.QueryLog.Path)
 		if rerr != nil {
-			return corpus.Sources{}, fmt.Errorf("read query log: %w", rerr)
+			// Not fatal, and deliberately not an empty log either. One
+			// truncated line in a multi-GB rotated set used to exit scan
+			// non-zero and do nothing at all; treating it as an empty log
+			// instead would be far worse, since an empty log says nobody
+			// queried anything. This degrades exactly as an unreachable
+			// Grafana does: said loudly, graded around, every drop
+			// withheld. safe.Text because the error embeds log content.
+			fmt.Fprintf(os.Stderr, "warning: query log configured but unreadable, every drop withheld: %s\n",
+				safe.Text(rerr.Error()))
+			src.QueryLogUnreadable = true
+		} else {
+			src.QueryLog = reading
+			if reading != nil {
+				src.LogQualifies = reading.Span >= cfg.QueryLog.MinWindow
+			}
 		}
-		src.QueryLog = reading
-		if reading != nil {
-			src.LogQualifies = reading.Span >= cfg.QueryLog.MinWindow
+
+		// The one configuration where the query log's blind spot bites.
+		// Prometheus' global.query_log_file records PromQL engine
+		// evaluations only: a metric read through /api/v1/label/*/values
+		// or /api/v1/series -- which is how Grafana resolves a dashboard's
+		// template variables, and what Explore's metric browser uses --
+		// never appears in it. With a qualifying log and no Grafana, such
+		// a metric is absent from the corpus, grades unqueried, and plain
+		// "jetsam propose" with no flag proposes deleting it.
+		if cfg.Grafana.URL == "" {
+			fmt.Fprintln(os.Stderr, "warning: query_log.path is set and grafana.url is not. Prometheus' query log "+
+				"records PromQL queries only, so a metric read only through label-values or series lookups -- "+
+				"how Grafana resolves dashboard variables -- is invisible to it and can grade unqueried. "+
+				"Set grafana.url to cover that case.")
 		}
 	}
 	return src, nil
@@ -312,13 +342,14 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 	}
 	cor := corpus.Build(src, names)
 	res := verdict.Compute(inv, cor)
-	// DashboardsMissing must widen this the same as a blocked rule does:
-	// -include-unreferenced only accepts the gap in evidence that comes
-	// from having no query log, never the gap that comes from Grafana
-	// being configured and unreachable. Checking only res.Blocked here
-	// would let that flag override withholding that verdict.Compute
-	// already enforced on every verdict's Droppable field.
-	blocked := len(res.Blocked) > 0 || res.DashboardsMissing
+	// DashboardsMissing and QueryLogMissing must widen this the same as a
+	// blocked rule does: -include-unreferenced only accepts the gap in
+	// evidence that comes from never having asked for a query log, never
+	// the gap that comes from evidence being configured and unavailable.
+	// Checking only res.Blocked here would let that flag override
+	// withholding that verdict.Compute already enforced on every verdict's
+	// Droppable field.
+	blocked := len(res.Blocked) > 0 || res.DashboardsMissing || res.QueryLogMissing
 
 	var eligible []verdict.Verdict
 	for _, v := range res.Verdicts {
@@ -445,6 +476,14 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 		case res.DashboardsMissing:
 			fmt.Fprintln(stdout, "dashboard evidence was configured but could not be fetched, so every drop is "+
 				"withheld until Grafana is reachable again. See `jetsam scan` for detail.")
+		case res.QueryLogMissing:
+			// The query log is the only source whose SILENCE is evidence,
+			// so one that could not be read leaves jetsam with no negative
+			// evidence at all. Withheld, not graded around -- and said
+			// here rather than left to the generic "nothing unread"
+			// message, which would read as a clean bill of health.
+			fmt.Fprintln(stdout, "the query log was configured but could not be read, so jetsam has no evidence that "+
+				"anything went unqueried and every drop is withheld. See `jetsam scan` for detail.")
 		case len(res.Blocked) > 0:
 			fmt.Fprintf(stdout, "%d rule(s) could not be read; a blocked rule may reference anything, "+
 				"so every drop is withheld until it is fixed. See `jetsam scan` for which.\n", len(res.Blocked))
@@ -512,9 +551,13 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 		// The same fact the PR body states, said here too: a dry run must
 		// not need the body read in full to know a drop rests on faith
 		// rather than evidence.
-		fmt.Fprintf(stdout, "-include-unreferenced is set: %d metric(s) below are not referenced by any rule, but "+
-			"jetsam has no query log and therefore cannot see ad-hoc or Grafana Explore queries against them. "+
-			"You have accepted that risk.\n\n", len(unreferenced))
+		// The same three-state clause report.Scan and the PR body use --
+		// see corpus.Corpus.LogShortfall. This said "jetsam has no query
+		// log" flatly, which was wrong on every install whose log was
+		// configured and merely short of the window.
+		fmt.Fprintf(stdout, "-include-unreferenced is set: %d metric(s) below are not referenced by any rule or "+
+			"dashboard, but %s, so jetsam cannot see ad-hoc or Grafana Explore queries against them. "+
+			"You have accepted that risk.\n\n", len(unreferenced), cor.LogShortfall())
 	}
 
 	newYAML, err := emit.Render(string(promYAML), drops)
