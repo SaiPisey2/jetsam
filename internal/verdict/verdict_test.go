@@ -4,10 +4,13 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
+	"github.com/SaiPisey2/jetsam/internal/grafana"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
 	"github.com/SaiPisey2/jetsam/internal/promapi"
+	"github.com/SaiPisey2/jetsam/internal/querylog"
 )
 
 func fixture() (inventory.Inventory, corpus.Corpus) {
@@ -18,6 +21,7 @@ func fixture() (inventory.Inventory, corpus.Corpus) {
 	c := corpus.Corpus{
 		Queries:  3,
 		Used:     map[string]bool{"used_metric": true},
+		UsedBy:   map[string]corpus.Source{"used_metric": corpus.FromRule},
 		Produced: map[string]bool{"job:rec": true},
 	}
 	return inv, c
@@ -235,6 +239,97 @@ func TestUsedReasonIsUnchangedByTheBlockedFix(t *testing.T) {
 			if v.Droppable {
 				t.Error("job:rec: Droppable = true, want false")
 			}
+		}
+	}
+}
+
+// TestUsedReasonNamesTheActualSource is the acceptance test for the
+// report that attributed dashboard and query-log evidence to rules. On the
+// live fixture this printed "jetsam_demo_requests_total used read by a
+// rule" and "node_uname_info used read by a rule" -- of two metrics no
+// rule reads, and the two this sub-project exists to protect. A reviewer
+// who searches the rules for either name finds nothing, and the reasonable
+// conclusion from finding nothing is that jetsam is wrong.
+func TestUsedReasonNamesTheActualSource(t *testing.T) {
+	inv := inventory.Build(promapi.Status{
+		Counts:     map[string]int{"rule_metric": 1, "dash_metric": 1, "logged_metric": 1, "shared_metric": 1},
+		HeadSeries: 4,
+	})
+	c := corpus.Build(corpus.Sources{
+		Rules: []promapi.Rule{
+			{Group: "g", Name: "r", Type: "alerting", Query: `rule_metric > 0`},
+			{Group: "g", Name: "s", Type: "alerting", Query: `shared_metric > 0`},
+		},
+		Dashboards: []grafana.Dashboard{{UID: "d", Title: "D",
+			Queries: []string{`rate(dash_metric[5m])`, `shared_metric`}}},
+		QueryLog:             &querylog.Reading{Queries: []string{"logged_metric"}, Span: 800 * time.Hour},
+		LogQualifies:         true,
+		DashboardsConfigured: true, DashboardsReachable: true,
+	}, []string{"rule_metric", "dash_metric", "logged_metric", "shared_metric"})
+
+	want := map[string]string{
+		"rule_metric":   "read by a rule",
+		"dash_metric":   "read by a dashboard",
+		"logged_metric": "read by a logged query",
+		"shared_metric": "read by a rule and a dashboard",
+	}
+	for _, v := range Compute(inv, c).Verdicts {
+		if v.Grade != GradeUsed {
+			t.Errorf("%s: Grade = %q, want %q", v.Metric, v.Grade, GradeUsed)
+		}
+		if v.Reason != want[v.Metric] {
+			t.Errorf("%s: Reason = %q, want %q", v.Metric, v.Reason, want[v.Metric])
+		}
+	}
+}
+
+// TestAnUnreadableQueryLogWithholdsEveryDrop: an unusable log is the
+// absence of negative evidence, not evidence of absence. It must withhold
+// exactly as an unreachable Grafana does.
+func TestAnUnreadableQueryLogWithholdsEveryDrop(t *testing.T) {
+	inv, c := fixture()
+	c.LogUnreadable = true
+	got := Compute(inv, c)
+
+	if !got.QueryLogMissing {
+		t.Error("Result.QueryLogMissing = false, want true")
+	}
+	for _, v := range got.Verdicts {
+		if v.Droppable {
+			t.Errorf("%s: Droppable = true although the query log could not be read", v.Metric)
+		}
+	}
+	if got.DroppableSeries != 0 {
+		t.Errorf("DroppableSeries = %d, want 0", got.DroppableSeries)
+	}
+	for _, v := range got.Verdicts {
+		if v.Metric != "unread_metric" {
+			continue
+		}
+		if !strings.Contains(v.Reason, "could not be read") {
+			t.Errorf("unread_metric: Reason = %q, does not say the log could not be read", v.Reason)
+		}
+	}
+}
+
+// TestUnreferencedReasonNamesWhyTheLogDoesNotHelp: "no query log" said of
+// a log that is configured and merely short sends an operator to configure
+// something they already configured.
+func TestUnreferencedReasonNamesWhyTheLogDoesNotHelp(t *testing.T) {
+	inv, c := fixture()
+	c.LogRead = true
+	c.LogSpan = 3 * time.Hour
+	c.LogQualifies = false
+
+	for _, v := range Compute(inv, c).Verdicts {
+		if v.Metric != "unread_metric" {
+			continue
+		}
+		if strings.Contains(v.Reason, "no query log") {
+			t.Errorf("Reason = %q claims no query log although one is configured and short", v.Reason)
+		}
+		if !strings.Contains(v.Reason, "short of the configured minimum") {
+			t.Errorf("Reason = %q does not say the configured log is too short", v.Reason)
 		}
 	}
 }

@@ -174,6 +174,87 @@ func TestScanStatesTheLogSpanAgainstTheMinimum(t *testing.T) {
 	if !strings.Contains(out, "not long enough") {
 		t.Errorf("report does not say the span was insufficient:\n%s", out)
 	}
+	// The contradiction this test used to pass straight over: it asserted
+	// only the span lines, so it never noticed that the "Droppable none"
+	// line two lines above blamed a query log that is plainly configured
+	// and described on the very next line.
+	if strings.Contains(out, "no query log configured") {
+		t.Errorf("report blames a missing query log while describing the configured one two lines below:\n%s", out)
+	}
+	if !strings.Contains(out, "Droppable  none -- the query log covers only 3h0m0s, short of the configured minimum") {
+		t.Errorf("report does not name the short log as why nothing is droppable:\n%s", out)
+	}
+}
+
+// TestScanNamesOnlyTheSourcesActuallyConfigured: naming dashboards and a
+// query log on an install that has neither overstates the evidence behind
+// every verdict below it.
+func TestScanNamesOnlyTheSourcesActuallyConfigured(t *testing.T) {
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "m", Series: 1}}, TotalSeries: 1}
+	c := corpus.Build(corpus.Sources{
+		Rules: []promapi.Rule{{Group: "g", Name: "r", Type: "alerting", Query: `m > 0`}},
+	}, []string{"m"})
+	var b bytes.Buffer
+	Scan(&b, inv, c, verdict.Compute(inv, c))
+	out := b.String()
+	if !strings.Contains(out, "Queries    1 read from rules\n") {
+		t.Errorf("header names sources that are not configured:\n%s", out)
+	}
+}
+
+// TestScanReportsAnUnparseableDashboardPanel: the containment of a
+// malformed panel is only half the behaviour. The other half is that an
+// operator is told, and nothing asserted that end of it.
+func TestScanReportsAnUnparseableDashboardPanel(t *testing.T) {
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "m", Series: 1}}, TotalSeries: 1}
+	c := corpus.Build(corpus.Sources{
+		Dashboards: []grafana.Dashboard{{UID: "u", Title: "Broken Board",
+			Queries: []string{`rate(m[`}}},
+		DashboardsConfigured: true, DashboardsReachable: true,
+	}, []string{"m"})
+	if len(c.DashboardPanelsUnparsed) != 1 {
+		t.Fatalf("test setup: DashboardPanelsUnparsed = %v, want one entry", c.DashboardPanelsUnparsed)
+	}
+	var b bytes.Buffer
+	Scan(&b, inv, c, verdict.Compute(inv, c))
+	out := b.String()
+	if !strings.Contains(out, "Unparsed") || !strings.Contains(out, "Broken Board") {
+		t.Errorf("report does not name the dashboard panel it could not parse:\n%s", out)
+	}
+}
+
+// TestScanReportsAnUnreadableQueryLog: the state where jetsam asked for
+// negative evidence and did not get it. It must not read as an install
+// with no query log, and it must not read as a droppable one.
+func TestScanReportsAnUnreadableQueryLog(t *testing.T) {
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "m", Series: 1}}, TotalSeries: 1}
+	c := corpus.Build(corpus.Sources{QueryLogUnreadable: true}, []string{"m"})
+	var b bytes.Buffer
+	Scan(&b, inv, c, verdict.Compute(inv, c))
+	out := b.String()
+	if !strings.Contains(out, "Droppable  none -- the query log was configured but could not be read") {
+		t.Errorf("report does not blame the unreadable log for nothing being droppable:\n%s", out)
+	}
+	if !strings.Contains(out, "Query log  configured but could not be read") {
+		t.Errorf("report does not state that the log could not be read:\n%s", out)
+	}
+}
+
+// TestScanStatesTheLogsEndTime: Span alone cannot tell a log covering the
+// last 30 days from one covering 30 days of last year, and jetsam does not
+// refuse on staleness. Showing the end is the least it can do.
+func TestScanStatesTheLogsEndTime(t *testing.T) {
+	end := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "m", Series: 1}}, TotalSeries: 1}
+	c := corpus.Build(corpus.Sources{
+		QueryLog:     &querylog.Reading{Queries: []string{"other"}, Span: 800 * time.Hour, End: end},
+		LogQualifies: true,
+	}, []string{"m"})
+	var b bytes.Buffer
+	Scan(&b, inv, c, verdict.Compute(inv, c))
+	if !strings.Contains(b.String(), "ending 2025-03-04T05:06:07Z") {
+		t.Errorf("report does not state when the query log's coverage ends:\n%s", b.String())
+	}
 }
 
 func TestScanSaysWhenDashboardEvidenceIsMissing(t *testing.T) {
@@ -211,7 +292,7 @@ func TestScanSaysDashboardsMissingIsWhyNothingIsDroppable(t *testing.T) {
 	if !strings.Contains(out, "Droppable  none -- dashboard evidence was configured but could not be fetched") {
 		t.Errorf("report does not blame missing dashboard evidence for nothing being droppable:\n%s", out)
 	}
-	if strings.Contains(out, "every metric is referenced by a rule or was read within the query-log window") {
+	if strings.Contains(out, "every metric is referenced by a rule or dashboard, or was read within the query-log window") {
 		t.Errorf("report falls through to the misleading default explanation:\n%s", out)
 	}
 }
@@ -246,7 +327,7 @@ func TestScanHeaderAttributesQueriesToAllThreeSources(t *testing.T) {
 	Scan(&b, inv, c, verdict.Compute(inv, c))
 	out := b.String()
 
-	if !strings.Contains(out, "Queries    3 read from rules, dashboards and query log") {
+	if !strings.Contains(out, "Queries    3 read from rules, dashboards and the query log") {
 		t.Errorf("header does not attribute queries to all three sources:\n%s", out)
 	}
 	if strings.Contains(out, "Queries    3 read from rules\n") {

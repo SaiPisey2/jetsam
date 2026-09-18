@@ -170,8 +170,11 @@ func TestBodyDoesNotWarnAboutUnreferencedWhenEveryDropIsFullyEvidenced(t *testin
 		{Metric: "x", Series: 10, Grade: verdict.GradeUnqueried, Droppable: true},
 	}}
 	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, corpus.Corpus{Queries: 200}, inventory.Inventory{TotalSeries: 1000}, 0)
-	if strings.Contains(body, "-include-unreferenced") {
-		t.Errorf("body warns about -include-unreferenced although every drop rests on unqueried grade:\n%s", body)
+	// The WARNING, not the flag name: "How to check this" explains what
+	// each grade means and names the flag as part of that explanation,
+	// which is not a warning about this pull request's own drops.
+	if strings.Contains(body, `rest on "unreferenced" grade`) {
+		t.Errorf("body warns about unreferenced grade although every drop rests on unqueried grade:\n%s", body)
 	}
 }
 
@@ -630,5 +633,68 @@ func TestBodyBoundsUnqueriedClaimByLogWindow(t *testing.T) {
 	}
 	if !strings.Contains(body, "unqueried") {
 		t.Errorf("body does not mention the unqueried grade it is bounding:\n%s", body)
+	}
+}
+
+// TestBodyReportsAnUnparseableDashboardPanel: containment of a malformed
+// panel is only half the behaviour; the other half is that the reviewer
+// approving an irreversible deletion is told which panel jetsam could not
+// read, and nothing asserted that end of it.
+func TestBodyReportsAnUnparseableDashboardPanel(t *testing.T) {
+	res := verdict.Result{Verdicts: []verdict.Verdict{
+		{Metric: "x", Series: 10, Grade: verdict.GradeUnqueried, Droppable: true},
+	}}
+	c := corpus.Corpus{
+		Queries:                 200,
+		DashboardPanelsUnparsed: []string{"dashboard Broken Board (u): parse error"},
+	}
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, c, inventory.Inventory{TotalSeries: 1000}, 0)
+	if !strings.Contains(body, "Broken Board") {
+		t.Errorf("body does not name the dashboard panel jetsam could not parse:\n%s", body)
+	}
+	if !strings.Contains(body, "could not be parsed") {
+		t.Errorf("body does not explain what the unparsed panel means:\n%s", body)
+	}
+}
+
+// TestBodyCountsUnparseableVariablesWithoutNamingThem: label_values() is
+// never PromQL, so three of the vendored dashboard's four template
+// variables land here on a perfectly healthy install. Listing them would
+// show three broken-looking things on every scan of a working system; a
+// count with its explanation is the honest amount to say.
+func TestBodyCountsUnparseableVariablesWithoutNamingThem(t *testing.T) {
+	res := verdict.Result{Verdicts: []verdict.Verdict{
+		{Metric: "x", Series: 10, Grade: verdict.GradeUnqueried, Droppable: true},
+	}}
+	c := corpus.Corpus{
+		Queries:                    200,
+		DashboardVariablesUnparsed: []string{"dashboard D (u): variable label_values(node_uname_info, job)"},
+	}
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, c, inventory.Inventory{TotalSeries: 1000}, 0)
+	if !strings.Contains(body, "1 dashboard template variable(s) are not PromQL") {
+		t.Errorf("body does not count the template variables it could not parse:\n%s", body)
+	}
+	if strings.Contains(body, "label_values(node_uname_info, job)") {
+		t.Errorf("body names an unparseable template variable, which is normal and reads as breakage:\n%s", body)
+	}
+}
+
+// TestBodyDoesNotGeneralisTheQueryLogToReads is C1's documentation half.
+// Prometheus' global.query_log_file records PromQL engine evaluations
+// only: a read through /api/v1/label/*/values or /api/v1/series -- how
+// Grafana resolves a dashboard's variables -- never appears in it. On the
+// live fixture 1948 of 1948 logged reads were /api/v1/query. The body must
+// not claim the log saw reads it cannot see.
+func TestBodyDoesNotGeneraliseTheQueryLogToReads(t *testing.T) {
+	res := verdict.Result{Verdicts: []verdict.Verdict{
+		{Metric: "x", Series: 10, Grade: verdict.GradeUnqueried, Droppable: true},
+	}}
+	c := corpus.Corpus{Queries: 200, LogRead: true, LogQualifies: true, LogSpan: 800 * time.Hour}
+	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, c, inventory.Inventory{TotalSeries: 1000}, 0)
+	if strings.Contains(body, "nothing read them within") {
+		t.Errorf("body still claims the query log covers reads rather than PromQL queries:\n%s", body)
+	}
+	if !strings.Contains(body, "PromQL engine queries only") {
+		t.Errorf("body does not state what the query log can and cannot see:\n%s", body)
 	}
 }

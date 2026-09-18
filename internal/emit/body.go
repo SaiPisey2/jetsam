@@ -199,8 +199,8 @@ func Body(drops []Drop, res verdict.Result, c corpus.Corpus, inv inventory.Inven
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "## jetsam: %d series nothing reads\n\n", total)
-	fmt.Fprintf(&b, "Checked against %d queries read from this Prometheus's own rules, dashboards and query log. "+
-		"Every metric below is named by none of them.\n\n", c.Queries)
+	fmt.Fprintf(&b, "Checked against %d queries read from this Prometheus's own %s. "+
+		"Every metric below is named by none of them.\n\n", c.Queries, c.SourceList())
 
 	// The irreversibility warning: near the top, ahead of any numbers, ahead
 	// of the table. Reverting this PR restores collection; it does not
@@ -225,11 +225,22 @@ func Body(drops []Drop, res verdict.Result, c corpus.Corpus, inv inventory.Inven
 				"every drop below is withheld until Grafana is reachable again.\n\n")
 		}
 	}
+	if c.LogUnreadable {
+		fmt.Fprint(&b, "> [!WARNING]\n> **A query log is configured and could not be read.** It is the only source whose "+
+			"silence is evidence, so jetsam has no negative evidence at all on this run and every drop below is "+
+			"withheld until the log is readable again.\n\n")
+	}
 	if c.LogRead {
+		// The end time goes beside the span deliberately. A span alone
+		// cannot tell a log covering the last 30 days from one covering 30
+		// days of last year, and a reviewer approving a deletion on the
+		// strength of "nothing queried it" should be able to see when the
+		// log stopped looking.
 		if c.LogQualifies {
-			fmt.Fprintf(&b, "Query log: covers %s.\n\n", c.LogSpan.Round(time.Hour))
+			fmt.Fprintf(&b, "Query log: covers %s, ending %s.\n\n", c.LogSpan.Round(time.Hour), c.LogEndText())
 		} else {
-			fmt.Fprintf(&b, "Query log: covers %s -- not long enough to license a drop.\n\n", c.LogSpan.Round(time.Hour))
+			fmt.Fprintf(&b, "Query log: covers %s, ending %s -- not long enough to license a drop.\n\n",
+				c.LogSpan.Round(time.Hour), c.LogEndText())
 		}
 	}
 	if len(c.DashboardPanelsUnparsed) > 0 {
@@ -240,13 +251,34 @@ func Body(drops []Drop, res verdict.Result, c corpus.Corpus, inv inventory.Inven
 		}
 		b.WriteString("\n")
 	}
+	if len(c.QueryLogUnparsed) > 0 {
+		// Named, not counted, unlike the template variables below: the
+		// query log is the one source whose silence licenses a deletion,
+		// so a query it could not read is a gap in the evidence the drops
+		// below rest on rather than an ordinary shape of the input.
+		fmt.Fprintf(&b, "%d logged quer(ies) could not be parsed and were conservatively marked as reading "+
+			"every metric-shaped token they mention:\n\n", len(c.QueryLogUnparsed))
+		for _, q := range c.QueryLogUnparsed {
+			fmt.Fprintf(&b, "- %s\n", mdText(q))
+		}
+		b.WriteString("\n")
+	}
+	if n := len(c.DashboardVariablesUnparsed); n > 0 {
+		// A count with its explanation, never the list: a dashboard's
+		// template variables are normally Grafana functions such as
+		// label_values(...), which is not PromQL and never parses, so
+		// naming them would fill this section with broken-looking entries
+		// on every healthy install.
+		fmt.Fprintf(&b, "%d dashboard template variable(s) are not PromQL -- normal, since `label_values()` and "+
+			"friends are Grafana functions rather than queries Prometheus parses. Every metric name in them is "+
+			"treated as read.\n\n", n)
+	}
 
 	if len(unreferenced) > 0 {
 		fmt.Fprintf(&b, "> [!WARNING]\n> **%d metric(s) below rest on \"unreferenced\" grade, not \"unqueried\".** "+
-			"They are not referenced by any rule, but jetsam has no query log configured -- or one configured but "+
-			"not covering the required window -- and therefore cannot see ad-hoc or Grafana Explore queries "+
-			"against them. `-include-unreferenced` was passed, and the operator who ran it has chosen to accept "+
-			"that risk.\n\n", len(unreferenced))
+			"They are not referenced by any rule or dashboard, but %s, so jetsam cannot see ad-hoc or Grafana "+
+			"Explore queries against them. `-include-unreferenced` was passed, and the operator who ran it has "+
+			"chosen to accept that risk.\n\n", len(unreferenced), c.LogShortfall())
 	}
 
 	if len(unqueried) > 0 {
@@ -255,9 +287,12 @@ func Body(drops []Drop, res verdict.Result, c corpus.Corpus, inv inventory.Inven
 		// A read that happened before that window, or recurs less often
 		// than it, would not appear in it -- so name the span here rather
 		// than let "unqueried" read as an unconditional guarantee.
-		fmt.Fprintf(&b, "%d metric(s) below rest on \"unqueried\" grade: nothing read them within the "+
-			"**%s** the query log actually covers. A read that happened before that window, or one that "+
-			"recurs less often than that, would not appear in it.\n\n", len(unqueried), c.LogSpan.Round(time.Hour))
+		fmt.Fprintf(&b, "%d metric(s) below rest on \"unqueried\" grade: no PromQL query ran against them in the "+
+			"**%s** the query log covers, ending %s. Prometheus' query log records PromQL engine queries only, "+
+			"so a read through the label-values or series endpoints -- which is how Grafana resolves a "+
+			"dashboard's variables -- never appears in it at all, and a query that ran before that window, or "+
+			"recurs less often than it, would not either.\n\n",
+			len(unqueried), c.LogSpan.Round(time.Hour), c.LogEndText())
 	}
 
 	if inv.Truncated {
@@ -325,7 +360,10 @@ func Body(drops []Drop, res verdict.Result, c corpus.Corpus, inv inventory.Inven
 		b.WriteString("\n")
 	}
 
-	b.WriteString("**How to check this**\n\nFor any metric above, search your rules for its name. " +
-		"jetsam proposes a drop only when that search returns nothing and a query log confirms nothing read it.\n")
+	b.WriteString("**How to check this**\n\nFor any metric above, search your rules and your Grafana dashboards " +
+		"for its name. A metric graded `unqueried` reached this list because that search came up empty AND a " +
+		"query log covering the window above recorded no PromQL query against it. A metric graded " +
+		"`unreferenced` reached it because the search came up empty and an operator passed " +
+		"`-include-unreferenced` to accept it without query-log evidence -- the grade column above says which.\n")
 	return title, b.String()
 }

@@ -60,6 +60,11 @@ type Result struct {
 	// could not be fetched, so the report layer can say so without
 	// re-deriving it from the corpus itself.
 	DashboardsMissing bool
+	// QueryLogMissing is true when a query log was configured and could not
+	// be read. Like DashboardsMissing it withholds every drop: evidence
+	// that was meant to exist and does not is not the same as evidence
+	// nobody asked for, and only the second is safe to grade around.
+	QueryLogMissing bool
 }
 
 // Compute grades every metric in the inventory.
@@ -75,8 +80,8 @@ func Compute(inv inventory.Inventory, c corpus.Corpus) Result {
 	// "No dashboard reads it" and "nobody looked" produce identical numbers
 	// and opposite meanings.
 	dashboardsMissing := c.DashboardsConfigured && !c.DashboardsReachable
-	res := Result{Blocked: c.Blocked, DashboardsMissing: dashboardsMissing}
-	blocked := len(c.Blocked) > 0 || dashboardsMissing
+	res := Result{Blocked: c.Blocked, DashboardsMissing: dashboardsMissing, QueryLogMissing: c.LogUnreadable}
+	blocked := len(c.Blocked) > 0 || dashboardsMissing || c.LogUnreadable
 	haveQueryLog := c.LogRead && c.LogQualifies
 
 	for _, m := range inv.Metrics {
@@ -84,16 +89,29 @@ func Compute(inv inventory.Inventory, c corpus.Corpus) Result {
 		switch {
 		case c.Used[m.Name]:
 			v.Grade = GradeUsed
-			v.Reason = "read by a rule"
+			// Which source read it, named from the corpus rather than
+			// assumed. The corpus was rules-only when this sentence was
+			// written and has not been for some time: saying "read by a
+			// rule" of a metric only a dashboard reads sends a reviewer to
+			// a file that does not mention it, and the conclusion they
+			// reasonably draw from not finding it is that the metric is
+			// droppable after all.
+			v.Reason = c.UsedBy[m.Name].Reason()
+			if v.Reason == "" {
+				// A corpus that records Used without UsedBy (a hand-built
+				// one in a test, never Build's output). Say less rather
+				// than name a source that may be wrong.
+				v.Reason = "read by a known query"
+			}
 		case c.Produced[m.Name]:
 			v.Grade = GradeUsed
 			v.Reason = "written by a recording rule"
 		case !haveQueryLog:
 			v.Grade = GradeUnreferenced
-			v.Reason = "no rule reads it; no query log, so ad-hoc reads are invisible"
+			v.Reason = "nothing known reads it; " + c.LogShortfall() + ", so ad-hoc reads are invisible"
 		default:
 			v.Grade = GradeUnqueried
-			v.Reason = "no rule reads it and no query read it in the window"
+			v.Reason = "no rule or dashboard reads it and no logged query read it in the window"
 			v.Droppable = true
 		}
 
@@ -104,9 +122,12 @@ func Compute(inv inventory.Inventory, c corpus.Corpus) Result {
 		// withheld metric showing the generic reason.
 		if blocked && v.Droppable {
 			v.Droppable = false
-			if dashboardsMissing {
+			switch {
+			case dashboardsMissing:
 				v.Reason = "blocked: dashboard evidence was configured but could not be fetched"
-			} else {
+			case c.LogUnreadable:
+				v.Reason = "blocked: the query log was configured but could not be read"
+			default:
 				v.Reason = "blocked: a query could not be read"
 			}
 		}

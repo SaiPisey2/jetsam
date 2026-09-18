@@ -23,7 +23,7 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 	}
 	fmt.Fprintf(w, "Metrics    %d\n", len(inv.Metrics))
 	fmt.Fprintf(w, "Series     %d\n", inv.TotalSeries)
-	fmt.Fprintf(w, "Queries    %d read from rules, dashboards and query log\n", c.Queries)
+	fmt.Fprintf(w, "Queries    %d read from %s\n", c.Queries, c.SourceList())
 	if res.DroppableSeries > 0 {
 		fmt.Fprintf(w, "Droppable  %d series (%.1f%% of stored)\n",
 			res.DroppableSeries, 100*inv.Share(res.DroppableSeries))
@@ -44,13 +44,20 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 		// the truth is the first.
 		case res.DashboardsMissing:
 			fmt.Fprintln(w, "Droppable  none -- dashboard evidence was configured but could not be fetched, so every drop is withheld")
+		case res.QueryLogMissing:
+			fmt.Fprintln(w, "Droppable  none -- the query log was configured but could not be read, so every drop is withheld")
 		case len(res.Blocked) > 0:
 			fmt.Fprintf(w, "Droppable  none -- %d rule(s) could not be read; a blocked rule may reference "+
 				"anything, so every drop is withheld until it is fixed\n", len(res.Blocked))
 		case anyUnreferenced(res.Verdicts):
-			fmt.Fprintln(w, "Droppable  none -- no query log configured, so ad-hoc reads are invisible")
+			// One owner for this clause -- see corpus.Corpus.LogShortfall.
+			// This branch used to say "no query log configured" flatly,
+			// two lines above a "Query log covers 3h -- not long enough"
+			// line printed from the same corpus, which contradicted itself
+			// on every install whose log was configured and short.
+			fmt.Fprintf(w, "Droppable  none -- %s, so ad-hoc reads are invisible\n", c.LogShortfall())
 		default:
-			fmt.Fprintln(w, "Droppable  none -- every metric is referenced by a rule or was read within the query-log window")
+			fmt.Fprintln(w, "Droppable  none -- every metric is referenced by a rule or dashboard, or was read within the query-log window")
 		}
 	}
 	// Blocked entries quote a rule's group, name and parse error, all
@@ -65,15 +72,38 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 			fmt.Fprintln(w, "Dashboards configured but could not be fetched -- every drop is withheld")
 		}
 	}
+	if c.LogUnreadable {
+		fmt.Fprintln(w, "Query log  configured but could not be read -- no negative evidence, so every drop is withheld")
+	}
 	if c.LogRead {
+		// The end time is printed beside the span because the span alone
+		// cannot distinguish a log that covers the last 30 days from one
+		// that covers 30 days of last year. jetsam does not refuse on a
+		// stale log; it must at least show one.
 		if c.LogQualifies {
-			fmt.Fprintf(w, "Query log  covers %s\n", c.LogSpan.Round(time.Hour))
+			fmt.Fprintf(w, "Query log  covers %s, ending %s\n", c.LogSpan.Round(time.Hour), c.LogEndText())
 		} else {
-			fmt.Fprintf(w, "Query log  covers %s -- not long enough to license a drop\n", c.LogSpan.Round(time.Hour))
+			fmt.Fprintf(w, "Query log  covers %s, ending %s -- not long enough to license a drop\n",
+				c.LogSpan.Round(time.Hour), c.LogEndText())
 		}
 	}
 	for _, p := range c.DashboardPanelsUnparsed {
 		fmt.Fprintf(w, "Unparsed   %s\n", safe.Text(p))
+	}
+	for _, q := range c.QueryLogUnparsed {
+		// The query log is the only source whose SILENCE licenses a
+		// deletion, so a query it could not read is the one parse failure
+		// that must never be swallowed.
+		fmt.Fprintf(w, "Unparsed   %s\n", safe.Text(q))
+	}
+	if n := len(c.DashboardVariablesUnparsed); n > 0 {
+		// A COUNT, not the list. A dashboard's template variables are
+		// normally Grafana functions like label_values(...), which is not
+		// PromQL and never parses -- three of the four on a healthy
+		// vendored dashboard land here -- so naming them would print three
+		// broken-looking lines on every scan of a working install.
+		fmt.Fprintf(w, "Variables  %d dashboard template variable(s) are not PromQL (normal: label_values() and "+
+			"friends are Grafana functions); every metric name in them is treated as read\n", n)
 	}
 	fmt.Fprintln(w)
 
@@ -95,11 +125,13 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 }
 
 // anyUnreferenced reports whether any verdict rests on GradeUnreferenced --
-// the grade that only exists because no query log is configured. Its
-// presence is what makes "no query log configured" the correct explanation
-// for "Droppable none"; its absence means every metric was either used or
-// fully evaluated against an actual query log, and nothing was missed for
-// lack of one.
+// the grade that only exists because no query log LICENSES a drop, which
+// covers three different states: none configured, one configured and too
+// short, and one configured and unreadable. Its presence is what makes a
+// query-log explanation the correct one for "Droppable none";
+// corpus.Corpus.LogShortfall says which of the three it is. Its absence
+// means every metric was either used or fully evaluated against an actual
+// qualifying log, and nothing was missed for lack of one.
 func anyUnreferenced(vs []verdict.Verdict) bool {
 	for _, v := range vs {
 		if v.Grade == verdict.GradeUnreferenced {
