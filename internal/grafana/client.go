@@ -3,6 +3,7 @@
 package grafana
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -116,6 +117,9 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 		}
 		return &apiError{Path: path, StatusCode: resp.StatusCode, Status: resp.Status, Body: text}
 	}
+	if bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
+		return fmt.Errorf("%s: response body was JSON null, not a value -- refusing to treat an unreadable Grafana as an empty one", path)
+	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("decode %s: %w", path, err)
 	}
@@ -161,7 +165,7 @@ func (c *Client) Dashboards(ctx context.Context) ([]Dashboard, error) {
 	out := make([]Dashboard, 0, len(hits))
 	for _, h := range hits {
 		var body struct {
-			Dashboard struct {
+			Dashboard *struct {
 				UID    string  `json:"uid"`
 				Title  string  `json:"title"`
 				Panels []panel `json:"panels"`
@@ -178,6 +182,9 @@ func (c *Client) Dashboards(ctx context.Context) ([]Dashboard, error) {
 				continue
 			}
 			return nil, fmt.Errorf("read dashboard %s: %w", h.UID, err)
+		}
+		if body.Dashboard == nil {
+			return nil, fmt.Errorf("read dashboard %s: response contained no dashboard object", h.UID)
 		}
 		var qs []string
 		collect(body.Dashboard.Panels, &qs)

@@ -150,3 +150,28 @@ func TestErrorNeverCarriesTheToken(t *testing.T) {
 		t.Fatalf("the token is in the error text, which reaches stderr and CI logs: %v", err)
 	}
 }
+
+// A JSON `null` at HTTP 200 is a no-op to json.Unmarshal, not an empty list --
+// so treating it as a legitimate empty search result would make an unreadable
+// Grafana indistinguishable from one with no dashboards, unprotecting every
+// metric at once.
+func TestANullSearchResponseIsAnError(t *testing.T) {
+	c := stub(t, `null`, map[string]string{})
+	got, err := c.Dashboards(context.Background())
+	if err == nil {
+		t.Fatalf("want an error for a null search response, got %d dashboards and nil error -- an empty result and an unreadable one must not be confused", len(got))
+	}
+}
+
+// Same blind spot one level down: a dashboard body of {"dashboard": null}
+// unmarshals without error and yields zero queries, silently protecting
+// nothing while looking like a normal (if boring) dashboard.
+func TestANullDashboardBodyIsAnError(t *testing.T) {
+	c := stub(t,
+		`[{"uid":"a","title":"A"}]`,
+		map[string]string{"a": `{"dashboard": null}`},
+	)
+	if _, err := c.Dashboards(context.Background()); err == nil {
+		t.Fatal("want an error for a null dashboard body, got nil")
+	}
+}
