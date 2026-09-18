@@ -103,10 +103,10 @@ func TestDashboardsCollectsVariableQueriesBothShapes(t *testing.T) {
 		t.Fatalf("got %d dashboards, want 1", len(got))
 	}
 	// None of these entries carries a "type", which is the shape this
-	// test is about: an entry whose type is unknown is read, since
-	// reading one extra string can only widen what looks used. A typed
-	// datasource variable is excluded instead -- see
-	// TestDatasourceVariablesAreNotCountedAsQueries.
+	// test is about: an entry with no type is read, since reading one
+	// extra string can only widen what looks used. Only "datasource" and
+	// "adhoc" are excluded -- see
+	// TestDatasourceAndAdhocVariablesAreNotCollected.
 	want := map[string]bool{
 		"prometheus":                         true,
 		"label_values(node_uname_info, job)": true,
@@ -357,17 +357,19 @@ func TestSearchHitWithNoUIDIsAnError(t *testing.T) {
 	}
 }
 
-// TestDatasourceVariablesAreNotCountedAsQueries: a datasource variable's
-// query field is the plain string "prometheus" -- a datasource name, not
-// PromQL. Counting it inflates the query total a pull request quotes as
-// its evidence, and it parses as a vector selector, so it also adds a
-// phantom read of a metric called "prometheus".
-func TestDatasourceVariablesAreNotCountedAsQueries(t *testing.T) {
+// TestDatasourceAndAdhocVariablesAreNotCollected pins the whole deny-list.
+// A datasource variable's query is the plain string "prometheus" -- a
+// datasource name that parses as a vector selector, so collecting it both
+// inflates the query total a pull request quotes as its evidence and adds
+// a phantom read of a metric called "prometheus". An adhoc variable's
+// value is a set of label filters. Those two are the only types whose
+// values are never metric names; everything else is read.
+func TestDatasourceAndAdhocVariablesAreNotCollected(t *testing.T) {
 	c := stub(t,
 		`[{"uid":"a","title":"A"}]`,
 		map[string]string{"a": `{"dashboard":{"uid":"a","title":"A","panels":[],"templating":{"list":[
 			{"name":"ds_prometheus","type":"datasource","query":"prometheus"},
-			{"name":"interval","type":"interval","query":"1m,5m"},
+			{"name":"filters","type":"adhoc","query":"prometheus"},
 			{"name":"job","type":"query","query":"label_values(node_uname_info, job)"}
 		]}}}`},
 	)
@@ -402,5 +404,45 @@ func TestSearchThatIgnoresPagingIsAnError(t *testing.T) {
 
 	if _, err := c.Dashboards(context.Background()); err == nil {
 		t.Error("a search that ignores the page parameter returned no error")
+	}
+}
+
+// TestConstantAndCustomVariablesAreCollected is the loss case the
+// type allow-list introduced. A constant, custom or textbox variable
+// routinely holds a metric name -- that is what they are for -- and a
+// panel consuming $metric{job="x"} does not rescue them: that expression
+// fails Extract, and the lexical fallback recovers only "metric", "job"
+// and "x". So a metric named ONLY in one of these variables becomes
+// droppable, which is precisely the failure the variable-reading work
+// exists to prevent.
+func TestConstantAndCustomVariablesAreCollected(t *testing.T) {
+	c := stub(t,
+		`[{"uid":"a","title":"A"}]`,
+		map[string]string{"a": `{"dashboard":{"uid":"a","title":"A","panels":[],"templating":{"list":[
+			{"name":"metric","type":"constant","query":"node_uname_info"},
+			{"name":"pair","type":"custom","query":"node_cpu_seconds_total,up"},
+			{"name":"free","type":"textbox","query":"node_memory_MemFree_bytes"},
+			{"name":"weird","type":"something_new","query":"future_metric_total"},
+			{"name":"job","type":"query","query":"label_values(node_uname_info, job)"}
+		]}}}`},
+	)
+	got, err := c.Dashboards(context.Background())
+	if err != nil {
+		t.Fatalf("Dashboards: %v", err)
+	}
+	want := map[string]bool{
+		"node_uname_info":                    true,
+		"node_cpu_seconds_total,up":          true,
+		"node_memory_MemFree_bytes":          true,
+		"future_metric_total":                true,
+		"label_values(node_uname_info, job)": true,
+	}
+	if len(got[0].VariableQueries) != len(want) {
+		t.Fatalf("VariableQueries = %v, want %d entries: %v", got[0].VariableQueries, len(want), want)
+	}
+	for _, q := range got[0].VariableQueries {
+		if !want[q] {
+			t.Errorf("unexpected variable query %q", q)
+		}
 	}
 }

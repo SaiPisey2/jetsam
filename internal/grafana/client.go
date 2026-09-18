@@ -196,14 +196,29 @@ type templateVar struct {
 	Query json.RawMessage `json:"query"`
 }
 
-// isQueryVar reports whether a template variable's query field is meant to
-// be a query at all. A datasource variable's query is the plain string
-// "prometheus" -- a datasource name, not PromQL -- and counting it inflates
-// the query total a pull request quotes as its evidence. An entry with no
-// type at all is treated as a query: unknown shapes err towards being read,
-// since reading one extra string can only widen what looks used.
-func isQueryVar(v templateVar) bool {
-	return v.Type == "" || v.Type == "query"
+// readsMetrics reports whether a template variable's query field could
+// name a metric. It is a DENY-list on purpose, not an allow-list.
+//
+// Only two types are excluded, because only two have values that are never
+// metric names: "datasource", whose query is a datasource name like
+// "prometheus", and "adhoc", whose value is a set of label filters.
+// Everything else is read, including types nobody here has heard of.
+//
+// An allow-list of {"query", untyped} looks tighter and is unsafe: a
+// "constant", "custom" or "textbox" variable routinely holds a metric name
+// -- that is what operators use them for -- and the panel that consumes it
+// as $metric{job="x"} does not rescue the name, because that expression
+// fails to parse and the lexical fallback recovers only "metric", "job" and
+// "x". A metric named only in such a variable would then look unread and
+// become droppable, breaking every panel that resolves through it. Reading
+// one extra string can only widen what looks used; refusing to read one can
+// delete data.
+func readsMetrics(v templateVar) bool {
+	switch v.Type {
+	case "datasource", "adhoc":
+		return false
+	}
+	return true
 }
 
 // variableQuery extracts one template variable's query text, handling
@@ -326,7 +341,7 @@ func (c *Client) Dashboards(ctx context.Context) ([]Dashboard, error) {
 
 		var vqs []string
 		for _, v := range body.Dashboard.Templating.List {
-			if !isQueryVar(v) {
+			if !readsMetrics(v) {
 				continue
 			}
 			if q := variableQuery(v.Query); q != "" {
