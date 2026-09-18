@@ -28,11 +28,17 @@ type Proposal struct {
 	// KeptSeries is left at its zero value here: this package has no label
 	// list to run a `count by (...)` query against, only a name and a
 	// series count. The caller fills this in from a real count query
-	// before comparing it against RawSeries -- see the task-3 brief's
-	// correction on why that comparison does not belong in Decide.
+	// before comparing it against RawSeries -- that comparison needs the
+	// count query's actual result, which does not exist at this point in
+	// the pipeline.
 	KeptSeries int
 	RuleName   string
-	Consumers  []Consumer
+	// Consumers is left empty here: this package has no rule list to
+	// populate it from, only the corpus's summarised Needs. A later step
+	// fills it in from the rules themselves when it builds the request
+	// that asks a human to approve the collapse, the same way it fills in
+	// KeptSeries from a count query.
+	Consumers []Consumer
 }
 
 // Consumer names one thing that reads a proposed metric, for the pull
@@ -53,8 +59,10 @@ type Refusal struct {
 }
 
 // Decide walks every metric in inv that the corpus has a Needs entry for,
-// and proposes collapsing it when every consumer agrees on both the label
-// set and the operator, and nothing jetsam cannot rewrite reads it.
+// and proposes collapsing it when the corpus's own evidence is complete,
+// nothing jetsam cannot rewrite reads it, it is not itself a recording
+// rule's output, and every consumer agrees on both the label set and the
+// operator.
 //
 // A metric with no Needs entry is skipped, not refused: absence means
 // nothing in the corpus touches it at all, which is the drop path's
@@ -69,7 +77,9 @@ type Refusal struct {
 // dashboard panel -- it passes the label-union test today and breaks the
 // moment anyone re-runs it once the raw series are gone. So both are
 // checked independently, and dashboardConsumers is kept only to name the
-// blocking dashboards when it can.
+// blocking dashboards when it can. Neither one, though, can see a read that
+// never made it into the corpus at all -- see the evidence-completeness
+// check inside refuse.
 func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[string][]string) ([]Proposal, []Refusal) {
 	var proposals []Proposal
 	var refusals []Refusal
@@ -89,6 +99,13 @@ func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[str
 		sort.Strings(keep)
 		op := need.Ops[0]
 
+		// keep can be empty here: All is false and Required is nil means the
+		// one consumer that touches this metric aggregates it down to a
+		// single series and needs no label at all -- collapsing 400 series
+		// to 1 is the correct answer for that consumer, not an accident.
+		// RuleName's leading colon (":m_total:sum") is the conventional
+		// rendering of an empty level in level:metric:operations, so the
+		// name stays idiomatic even at zero labels.
 		proposals = append(proposals, Proposal{
 			Metric:    m.Name,
 			Keep:      keep,
@@ -101,10 +118,39 @@ func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[str
 	return proposals, refusals
 }
 
-// refuse checks the causes in the brief's order and returns the first one
-// that fires, so a refusal always names the single reason that decided it
-// rather than whichever check happened to run last.
+// refuse checks the causes in order and returns the first one that fires,
+// so a refusal always names the single reason that decided it rather than
+// whichever check happened to run last.
 func refuse(metric string, need corpus.MetricNeed, c corpus.Corpus, dashboardConsumers map[string][]string) (string, bool) {
+	// The corpus itself can be incomplete: a rule that would not parse, a
+	// Grafana that was configured but never answered, a query log that was
+	// configured but could not be read. The drop path withholds every drop
+	// over exactly these three (internal/verdict's "blocked"), and this
+	// path needs the gate MORE, not less: a drop only claims silence, an
+	// aggregation claims every consumer was seen and agreed. When Grafana
+	// is unreachable, a metric a dashboard actually reads carries no
+	// FromDashboard bit and appears in no dashboardConsumers entry -- that
+	// state is indistinguishable from "no dashboard reads it" everywhere
+	// else in this file, so it must be caught here, once, before either of
+	// those silences gets read as permission.
+	switch {
+	case len(c.Blocked) > 0:
+		return "a rule did not parse, so the corpus cannot vouch for every consumer", true
+	case c.DashboardsConfigured && !c.DashboardsReachable:
+		return "Grafana is configured but was not reachable, so dashboard reads of this metric cannot be ruled out", true
+	case c.LogUnreadable:
+		return "the query log is configured but could not be read, so logged reads of this metric cannot be ruled out", true
+	}
+
+	// A recording rule's output is not scraped -- it is computed from other
+	// series -- so there are no raw series here for a scrape config to stop
+	// collecting. Proposing one anyway would ask for a rule-file edit that
+	// this package cannot make and a drop that has nothing to remove: a
+	// no-op dressed as an optimisation. See corpus.Corpus.Produced.
+	if c.Produced[metric] {
+		return "this metric is a recording rule's output, not a scraped series, so there is nothing here to collapse", true
+	}
+
 	if dashboards := dashboardConsumers[metric]; len(dashboards) > 0 {
 		return fmt.Sprintf("read by dashboard(s) jetsam cannot rewrite: %s", strings.Join(dashboards, ", ")), true
 	}
@@ -121,11 +167,39 @@ func refuse(metric string, need corpus.MetricNeed, c corpus.Corpus, dashboardCon
 		}
 		return reason, true
 	}
-	if len(need.Ops) != 1 {
+	// Blockers is documented as "human-readable reasons aggregation is
+	// impossible" -- corpus only ever sets one alongside All today, which
+	// would make this branch unreachable through corpus.Build, but this
+	// package does not get to assume that invariant holds forever in a
+	// package it does not own. A non-empty Blockers on its own is reason
+	// enough to refuse, All or not.
+	if len(need.Blockers) > 0 {
+		return "aggregation is impossible: " + strings.Join(need.Blockers, "; "), true
+	}
+	if len(need.Ops) == 0 {
+		// Not the same failure as disagreement below: no consumer that
+		// aggregates this metric was ever seen, so there is no operator to
+		// name it as safe or unsafe, and saying "disagree" here would point
+		// a reader at a disagreement that does not exist -- exactly the
+		// mistake Source.Reason's doc comment warns against for the same
+		// reason: it reads as jetsam being wrong rather than the input
+		// being what it is.
+		return "no consumer aggregates it, so there is no operator to record it under", true
+	}
+	if len(need.Ops) > 1 {
 		return fmt.Sprintf("consumers disagree on the aggregation operator: %s", strings.Join(need.Ops, ", ")), true
 	}
 	if !need.AllOpsSafe {
 		return fmt.Sprintf("the %s operator does not survive partial aggregation", need.Ops[0]), true
+	}
+	// AllOpsSafe already rules this out for anything corpus.Build produces
+	// today -- composes only ever sets it true for sum, min or max. Checked
+	// anyway rather than trusted from a distance: a MetricNeed built by
+	// something other than corpus.Build, or by a future corpus.Build that
+	// grows a new safe operator without updating this list, must not slip
+	// through on AllOpsSafe alone.
+	if op := need.Ops[0]; op != "sum" && op != "min" && op != "max" {
+		return fmt.Sprintf("%s is not sum, min or max, the only operators this package knows how to record", op), true
 	}
 	return "", false
 }
