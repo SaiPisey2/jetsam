@@ -89,6 +89,22 @@ since a flag value lands in `ps` output and shell history. `-apply` without
   outside that log's window, `remote_read`, or anything scraping
   `/federate`. A metric read only through one of those looks unreferenced
   or, if it happens to also predate the log's window, unqueried in error.
+- **The query log records PromQL queries, not reads.** Prometheus'
+  `global.query_log_file` logs what its query ENGINE evaluated. A metric
+  read through `/api/v1/label/<name>/values` or `/api/v1/series` never
+  appears in it — and that is how Grafana resolves a dashboard's template
+  variables, and what Explore's metric browser uses. On an install with
+  `query_log.path` set and `grafana.url` unset, such a metric is absent
+  from the corpus, grades `unqueried`, and plain `jetsam propose` proposes
+  dropping it. Configuring `grafana.url` is what covers that case, because
+  jetsam then reads those variable queries from the dashboards themselves;
+  `jetsam scan` warns when the log is configured and Grafana is not.
+- **jetsam sees the dashboards its token can see.** Grafana's search API
+  is paginated and jetsam pages through all of it, but a service-account
+  token without permission on every folder returns a subset, with no
+  indication that it did. Give the token organisation-wide dashboard read
+  access, or metrics referenced only by an invisible folder's dashboards
+  will look unread.
 - **Nothing is proposed without evidence.** See `-include-unreferenced`
   above. Without a qualifying query log, every unread metric is graded
   `unreferenced`, which never auto-proposes.
@@ -96,9 +112,16 @@ since a flag value lands in `ps` output and shell history. `-apply` without
   still runs and still grades from rules, but "no dashboard reads it" and
   "nobody looked" produce identical numbers, so nothing is proposed until
   Grafana answers again -- `-include-unreferenced` does not override this.
+- **A query log that cannot be read withholds every drop.** `scan` still
+  runs and still grades from rules and dashboards, but an unreadable log
+  is the absence of negative evidence, not evidence of absence -- so
+  nothing is proposed until it reads again, `-include-unreferenced`
+  included. jetsam says so on stderr and in the report rather than
+  exiting.
 - **`min_window` is a Go duration, not a calendar one.** `720h`, not
   `30d` -- `d` is not a Go duration unit and `jetsam.yaml` fails to parse
-  rather than silently treating the minimum as zero.
+  rather than silently treating the minimum as zero. A negative value is
+  refused outright, since `Span >= -1h` would qualify an empty log.
 - **One unreadable rule blocks every drop.** A rule jetsam cannot parse
   might reference anything, so nothing is proposed until it is fixed.
   `jetsam scan` names which.
