@@ -156,10 +156,55 @@ func (c Corpus) LogShortfall() string {
 		return "no query log is configured"
 	case !c.LogQualifies:
 		return fmt.Sprintf("the query log covers only %s, short of the configured minimum",
-			c.LogSpan.Round(time.Hour))
+			c.LogSpanText())
 	default:
 		return ""
 	}
+}
+
+// FormatSpan renders a duration for the sentence an operator reads to
+// decide whether a deletion is justified, honestly at every scale.
+//
+// This used to be Round(time.Hour), which prints "0s" for anything under
+// thirty minutes. A qualifying log covering twenty minutes therefore
+// reported zero coverage while licensing drops -- which does not read as a
+// rounding artifact, it reads as evidence that does not exist. At the other
+// end the same call printed a month as "744h0m0s", which is technically
+// true and unreadable.
+//
+// Sub-second spans keep their own units rather than rounding, so that no
+// non-zero span can ever render as "0s". Only a genuinely zero span does.
+func FormatSpan(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	if d < time.Second {
+		return d.String()
+	}
+	if d < time.Minute {
+		return d.Round(time.Second).String()
+	}
+	mins := int64(d.Round(time.Minute) / time.Minute)
+	days, rem := mins/(60*24), mins%(60*24)
+	hours, minutes := rem/60, rem%60
+	switch {
+	case days > 0 && hours > 0:
+		return fmt.Sprintf("%dd%dh", days, hours)
+	case days > 0:
+		return fmt.Sprintf("%dd", days)
+	case hours > 0 && minutes > 0:
+		return fmt.Sprintf("%dh%dm", hours, minutes)
+	case hours > 0:
+		return fmt.Sprintf("%dh", hours)
+	default:
+		return fmt.Sprintf("%dm", minutes)
+	}
+}
+
+// LogSpanText renders how much time the query log covers. One owner, so
+// the report and the pull request body cannot drift.
+func (c Corpus) LogSpanText() string {
+	return FormatSpan(c.LogSpan)
 }
 
 // LogEndText renders LogEnd for a human, or "unknown" when the log had no

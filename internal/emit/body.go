@@ -5,7 +5,6 @@ import (
 	"math"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
@@ -237,10 +236,10 @@ func Body(drops []Drop, res verdict.Result, c corpus.Corpus, inv inventory.Inven
 		// strength of "nothing queried it" should be able to see when the
 		// log stopped looking.
 		if c.LogQualifies {
-			fmt.Fprintf(&b, "Query log: covers %s, ending %s.\n\n", c.LogSpan.Round(time.Hour), c.LogEndText())
+			fmt.Fprintf(&b, "Query log: covers %s, ending %s.\n\n", c.LogSpanText(), c.LogEndText())
 		} else {
 			fmt.Fprintf(&b, "Query log: covers %s, ending %s -- not long enough to license a drop.\n\n",
-				c.LogSpan.Round(time.Hour), c.LogEndText())
+				c.LogSpanText(), c.LogEndText())
 		}
 	}
 	if len(c.DashboardPanelsUnparsed) > 0 {
@@ -292,7 +291,7 @@ func Body(drops []Drop, res verdict.Result, c corpus.Corpus, inv inventory.Inven
 			"so a read through the label-values or series endpoints -- which is how Grafana resolves a "+
 			"dashboard's variables -- never appears in it at all, and a query that ran before that window, or "+
 			"recurs less often than it, would not either.\n\n",
-			len(unqueried), c.LogSpan.Round(time.Hour), c.LogEndText())
+			len(unqueried), c.LogSpanText(), c.LogEndText())
 	}
 
 	if inv.Truncated {

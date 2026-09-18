@@ -612,7 +612,7 @@ func TestBodyWarnsWhenDashboardsUnreachable(t *testing.T) {
 func TestBodyStatesQueryLogSpan(t *testing.T) {
 	c := corpus.Corpus{Queries: 5, LogRead: true, LogSpan: 400 * time.Hour, LogQualifies: true}
 	_, body := Body(nil, verdict.Result{}, c, inventory.Inventory{TotalSeries: 100}, 0)
-	if !strings.Contains(body, "400h") {
+	if !strings.Contains(body, "16d16h") {
 		t.Errorf("body does not state the query log's span:\n%s", body)
 	}
 }
@@ -628,7 +628,7 @@ func TestBodyBoundsUnqueriedClaimByLogWindow(t *testing.T) {
 	}}
 	c := corpus.Corpus{Queries: 5, LogRead: true, LogSpan: 720 * time.Hour, LogQualifies: true}
 	_, body := Body([]Drop{{Metric: "x", Series: 10, Job: "api"}}, res, c, inventory.Inventory{TotalSeries: 1000}, 0)
-	if !strings.Contains(body, "720h") {
+	if !strings.Contains(body, "30d") {
 		t.Errorf("body does not name the log's span when bounding the unqueried claim:\n%s", body)
 	}
 	if !strings.Contains(body, "unqueried") {

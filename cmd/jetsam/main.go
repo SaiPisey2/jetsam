@@ -511,7 +511,7 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 					fmt.Fprintf(stdout, "query_log.path is configured, but its log only covers %s -- not long enough "+
 						"to license a drop -- so jetsam cannot tell \"no rule mentions this\" apart from \"nobody reads "+
 						"this\". Let it cover more of query_log.min_window, or pass -include-unreferenced to propose "+
-						"dropping rule-unreferenced metrics on faith instead.\n", cor.LogSpan.Round(time.Hour))
+						"dropping rule-unreferenced metrics on faith instead.\n", cor.LogSpanText())
 				default:
 					fmt.Fprintln(stdout, "no query log is configured, so jetsam cannot tell \"no rule mentions this\" apart from "+
 						"\"nobody reads this\" -- set query_log.path to make a metric eligible on evidence, or pass "+

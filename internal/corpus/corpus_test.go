@@ -309,7 +309,7 @@ func TestLogShortfallTellsTheThreeStatesApart(t *testing.T) {
 	}{
 		{"none configured", Corpus{}, "no query log is configured"},
 		{"configured but short", Corpus{LogRead: true, LogSpan: 3 * time.Hour},
-			"the query log covers only 3h0m0s, short of the configured minimum"},
+			"the query log covers only 3h, short of the configured minimum"},
 		{"unreadable", Corpus{LogUnreadable: true}, "the query log is configured but could not be read"},
 		{"qualifies", Corpus{LogRead: true, LogQualifies: true, LogSpan: 800 * time.Hour}, ""},
 	} {
@@ -329,5 +329,52 @@ func TestAnUnreadableLogIsNotAnEmptyOne(t *testing.T) {
 	}
 	if c.LogRead || c.LogQualifies {
 		t.Errorf("LogRead = %v, LogQualifies = %v -- an unreadable log must not look like evidence", c.LogRead, c.LogQualifies)
+	}
+}
+
+// TestFormatSpanNeverRendersANonZeroSpanAsZero is the assertion that would
+// have caught the defect this replaced. Round(time.Hour) printed "0s" for
+// every span under thirty minutes, so a qualifying log covering twenty
+// minutes reported zero coverage on the one line an operator reads to
+// decide whether a deletion is justified -- which does not look like
+// rounding, it looks like the evidence is empty.
+func TestFormatSpanNeverRendersANonZeroSpanAsZero(t *testing.T) {
+	for _, d := range []time.Duration{
+		time.Microsecond, 400 * time.Millisecond, time.Second, 45 * time.Second,
+		3 * time.Minute, 20 * time.Minute, 29*time.Minute + 59*time.Second,
+		time.Hour, 3 * time.Hour, 5*time.Hour + 12*time.Minute,
+		23 * time.Hour, 24 * time.Hour, 26 * time.Hour,
+		720 * time.Hour, 744 * time.Hour, 8760 * time.Hour,
+	} {
+		if got := FormatSpan(d); got == "0s" {
+			t.Errorf("FormatSpan(%s) = %q -- a non-zero span must never render as no coverage", d, got)
+		}
+	}
+	if got := FormatSpan(0); got != "0s" {
+		t.Errorf("FormatSpan(0) = %q, want %q", got, "0s")
+	}
+}
+
+// TestFormatSpanStaysReadableAtEveryScale pins the three boundaries that
+// used to lie: minutes vanished, hours were fine, and a month read as
+// "744h0m0s".
+func TestFormatSpanStaysReadableAtEveryScale(t *testing.T) {
+	for _, tc := range []struct {
+		d    time.Duration
+		want string
+	}{
+		{400 * time.Millisecond, "400ms"},
+		{45 * time.Second, "45s"},
+		{3 * time.Minute, "3m"},
+		{20 * time.Minute, "20m"},
+		{3 * time.Hour, "3h"},
+		{5*time.Hour + 12*time.Minute, "5h12m"},
+		{26 * time.Hour, "1d2h"},
+		{720 * time.Hour, "30d"},
+		{744 * time.Hour, "31d"},
+	} {
+		if got := FormatSpan(tc.d); got != tc.want {
+			t.Errorf("FormatSpan(%s) = %q, want %q", tc.d, got, tc.want)
+		}
 	}
 }

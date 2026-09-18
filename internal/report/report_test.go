@@ -181,7 +181,7 @@ func TestScanStatesTheLogSpanAgainstTheMinimum(t *testing.T) {
 	if strings.Contains(out, "no query log configured") {
 		t.Errorf("report blames a missing query log while describing the configured one two lines below:\n%s", out)
 	}
-	if !strings.Contains(out, "Droppable  none -- the query log covers only 3h0m0s, short of the configured minimum") {
+	if !strings.Contains(out, "Droppable  none -- the query log covers only 3h, short of the configured minimum") {
 		t.Errorf("report does not name the short log as why nothing is droppable:\n%s", out)
 	}
 }
@@ -332,5 +332,41 @@ func TestScanHeaderAttributesQueriesToAllThreeSources(t *testing.T) {
 	}
 	if strings.Contains(out, "Queries    3 read from rules\n") {
 		t.Errorf("header still attributes every query to rules alone:\n%s", out)
+	}
+}
+
+// TestScanStatesAShortSpanHonestly: a log covering twenty minutes that
+// nonetheless qualifies used to print "covers 0s", which reads as evidence
+// that does not exist rather than as a rounding artifact -- on the exact
+// line an operator uses to judge whether a drop is justified.
+func TestScanStatesAShortSpanHonestly(t *testing.T) {
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "m", Series: 1}}, TotalSeries: 1}
+	c := corpus.Build(corpus.Sources{
+		QueryLog:     &querylog.Reading{Queries: []string{"other"}, Span: 20 * time.Minute},
+		LogQualifies: true,
+	}, []string{"m"})
+	var b bytes.Buffer
+	Scan(&b, inv, c, verdict.Compute(inv, c))
+	out := b.String()
+	if !strings.Contains(out, "Query log  covers 20m,") {
+		t.Errorf("report does not state a twenty-minute span honestly:\n%s", out)
+	}
+	if strings.Contains(out, "covers 0s") {
+		t.Errorf("report renders a non-zero span as no coverage at all:\n%s", out)
+	}
+}
+
+// TestScanStatesALongSpanReadably: the other end of the same rounding.
+func TestScanStatesALongSpanReadably(t *testing.T) {
+	inv := inventory.Inventory{Metrics: []inventory.Metric{{Name: "m", Series: 1}}, TotalSeries: 1}
+	c := corpus.Build(corpus.Sources{
+		QueryLog:     &querylog.Reading{Queries: []string{"other"}, Span: 744 * time.Hour},
+		LogQualifies: true,
+	}, []string{"m"})
+	var b bytes.Buffer
+	Scan(&b, inv, c, verdict.Compute(inv, c))
+	out := b.String()
+	if !strings.Contains(out, "Query log  covers 31d,") {
+		t.Errorf("report does not render a month readably:\n%s", out)
 	}
 }

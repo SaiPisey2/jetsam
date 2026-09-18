@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"text/tabwriter"
-	"time"
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/inventory"
@@ -81,10 +80,10 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 		// that covers 30 days of last year. jetsam does not refuse on a
 		// stale log; it must at least show one.
 		if c.LogQualifies {
-			fmt.Fprintf(w, "Query log  covers %s, ending %s\n", c.LogSpan.Round(time.Hour), c.LogEndText())
+			fmt.Fprintf(w, "Query log  covers %s, ending %s\n", c.LogSpanText(), c.LogEndText())
 		} else {
 			fmt.Fprintf(w, "Query log  covers %s, ending %s -- not long enough to license a drop\n",
-				c.LogSpan.Round(time.Hour), c.LogEndText())
+				c.LogSpanText(), c.LogEndText())
 		}
 	}
 	for _, p := range c.DashboardPanelsUnparsed {
