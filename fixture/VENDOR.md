@@ -207,6 +207,37 @@ Whoever relies on this fixture's query log for anything beyond "the file
 exists and contains recognizable entries" needs to know this before
 trusting it as an independent evidence source in a test.
 
+### An untagged tooling query looks exactly like a disagreeing consumer
+
+The two consequences above are about the drop/verdict path marking too
+much `used`. The aggregate path has a sharper failure mode: an ordinary
+count(...) or count by(...) probe this fixture's OWN test suite issues
+against `jetsam_demo_requests_total` -- to check its cardinality, say --
+lands in the log as an ordinary read too, and `count` disagrees with
+`fixture/prometheus/rules/local.yaml`'s `LoadgenPathErrors`, which
+aggregates the same metric with `sum`. `aggregate.Decide` sees two
+consumers of the same metric claiming two different operators and
+refuses it -- correctly, given what it was handed, but for a reason the
+fixture's own test suite invented, not anything about the install being
+analysed. Running `jetsam aggregate` against this stack after `make
+demo-test` used to report the fixture's own flagship metric,
+`jetsam_demo_requests_total`, as un-aggregatable for exactly this reason.
+
+The fix is the same convention `promapi.QueryJobsFor` and
+`aggregate`'s own measurement query already use in production:
+`promapi.IgnoreUsageLabel` (`__ignore_usage__`) on every query issued
+against the metric, so `querylog.Read` recognises it as tooling and
+excludes it. Every query anything under `fixture/` issues against
+`jetsam_demo_requests_total` now carries that marker -- see
+`selectorTagged` in `fixture/aggregate_test.go` -- with exactly one
+deliberate exception: `fixture/query.sh`'s own read, which simulates the
+ad-hoc human query this fixture exists to provide and must stay untagged
+to do that job; it agrees with `LoadgenPathErrors` on operator and
+grouping, so it does not reintroduce the disagreement.
+`fixture/stack_test.go`'s `TestFixtureQueriesLeaveNoUntaggedTraceOfLoadgen`
+walks the log itself (not the test sources) and fails if any other
+untagged read of the metric ever appears in it again.
+
 ## The dashboard canary
 
 `fixture/verdict_test.go`'s `grade()` now builds its corpus from all

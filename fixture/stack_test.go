@@ -5,10 +5,14 @@ package fixture
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/SaiPisey2/jetsam/internal/promapi"
+	"github.com/prometheus/prometheus/promql/parser"
 )
 
 const promURL = "http://localhost:9090"
@@ -135,7 +139,14 @@ func TestLoadgenExposesItsExactCardinality(t *testing.T) {
 			} `json:"result"`
 		} `json:"data"`
 	}
-	get(t, "/api/v1/query?query=count(jetsam_demo_requests_total)", &body)
+	// __ignore_usage__ marks this as a cardinality check, not a real read --
+	// see selectorTagged's own doc comment (aggregate_test.go). An earlier,
+	// unmarked version of this exact query poisoned the query log every
+	// time this suite ran: it landed as an ordinary count() read of
+	// jetsam_demo_requests_total, which disagrees with LoadgenPathErrors'
+	// own sum, and a live `jetsam aggregate` run afterward refused the
+	// fixture's flagship metric for a reason the test suite invented.
+	get(t, "/api/v1/query?query="+url.QueryEscape("count("+selectorTagged(loadgenMetric)+")"), &body)
 
 	if len(body.Data.Result) != 1 {
 		t.Fatalf("count() returned %d results, want 1 -- is loadgen being scraped?", len(body.Data.Result))
@@ -246,5 +257,99 @@ func TestQueryLogCapturesTheKnownQueries(t *testing.T) {
 	if ruleQueries == 0 {
 		t.Log("NOTE: no rule evaluations appear in the log. Sub-project B can treat every " +
 			"entry as a real read; record this in VENDOR.md.")
+	}
+}
+
+// TestFixtureQueriesLeaveNoUntaggedTraceOfLoadgen is the regression test
+// for a defect this fixture actually shipped: TestLoadgenExposesItsExact-
+// Cardinality above used to issue count(jetsam_demo_requests_total)
+// untagged. It landed in the query log as an ordinary read, disagreed
+// with fixture/prometheus/rules/local.yaml's LoadgenPathErrors (which
+// aggregates the same metric with sum), and made a real `jetsam aggregate`
+// run refuse the fixture's own flagship metric for a reason this test
+// suite invented rather than anything about the install being analysed.
+//
+// Every query anything under fixture/ issues against jetsam_demo_requests_total
+// must carry promapi.IgnoreUsageLabel as an actual matcher -- see
+// selectorTagged in aggregate_test.go -- with exactly one deliberate
+// exception: issuedQueries[2], fixture/query.sh's own read, which
+// simulates the ad-hoc human query this fixture exists to provide (see
+// its own header comment) and must stay untagged to do that job. It
+// agrees with LoadgenPathErrors on operator and grouping, so it does not
+// reintroduce the disagreement this test exists to catch.
+//
+// This walks the LOG, not the test sources: a source-level audit only
+// proves today's queries are tagged as written, and says nothing about
+// what querylog.Read actually sees once a query has round-tripped through
+// Prometheus's own log format -- which is the artifact corpus.Build is
+// handed, and the one TestLoadgenExposesItsExactCardinality's own defect
+// went undetected in.
+func TestFixtureQueriesLeaveNoUntaggedTraceOfLoadgen(t *testing.T) {
+	data, err := os.ReadFile("querylog/queries.log")
+	if err != nil {
+		t.Fatalf("no query log, run `make demo-up`: %v", err)
+	}
+	p := parser.NewParser(parser.Options{})
+	checked := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var entry struct {
+			Params struct {
+				Query string `json:"query"`
+			} `json:"params"`
+			RuleGroup *struct{} `json:"ruleGroup"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("query log line is not JSON: %q: %v", line, err)
+		}
+		if entry.RuleGroup != nil {
+			continue // the server evaluating its own rules, not a read
+		}
+		q := entry.Params.Query
+		if q == "" || q == issuedQueries[2] {
+			// issuedQueries[2] is fixture/query.sh's deliberate, untagged,
+			// known ad-hoc read -- see this test's own doc comment.
+			continue
+		}
+		expr, err := p.ParseExpr(q)
+		if err != nil {
+			// Not this test's concern: a query the corpus itself cannot
+			// parse is handled (and asserted on) elsewhere.
+			continue
+		}
+		touches, tagged := false, false
+		parser.Inspect(expr, func(n parser.Node, _ []parser.Node) error {
+			vs, ok := n.(*parser.VectorSelector)
+			if !ok {
+				return nil
+			}
+			if vs.Name == loadgenMetric {
+				touches = true
+			}
+			for _, m := range vs.LabelMatchers {
+				if m.Name == "__name__" && m.Value == loadgenMetric {
+					touches = true
+				}
+				if m.Name == promapi.IgnoreUsageLabel {
+					tagged = true
+				}
+			}
+			return nil
+		})
+		if touches {
+			checked++
+			if !tagged {
+				t.Errorf("query log contains an untagged read of %s: %q -- "+
+					"it disagrees with LoadgenPathErrors and a real `jetsam aggregate` "+
+					"run would refuse the metric because of it, not because of anything "+
+					"the install being analysed actually did", loadgenMetric, q)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no logged query touched jetsam_demo_requests_total at all -- this test is " +
+			"vacuous as written; did fixture/query.sh and the aggregate tests run?")
 	}
 }

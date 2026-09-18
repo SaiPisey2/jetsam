@@ -248,15 +248,14 @@ func TestAggregateProposesLoadgenWithMeasuredNumbers(t *testing.T) {
 func TestAggregateRefusalTracksDashboardPresence(t *testing.T) {
 	inv, fullSrc := liveSources(t)
 	names := metricNames(inv)
-	// The live query log is excluded from BOTH halves of this comparison,
-	// not merely from one -- see VENDOR.md's "contaminated" section.
-	// stack_test.go's own TestLoadgenExposesItsExactCardinality issues
-	// count(jetsam_demo_requests_total) untagged, which lands in the log
-	// as an ordinary read; count disagrees with LoadgenPathErrors' own sum,
-	// a genuine Ops disagreement that refuses this metric regardless of
-	// dashboards and would confound the one thing this test isolates.
-	fullSrc.QueryLog = nil
-	fullSrc.LogQualifies = false
+	// This runs against the FULL live corpus, query log included -- no
+	// exclusion. Every query anything under fixture/ issues against
+	// jetsam_demo_requests_total is tagged with promapi.IgnoreUsageLabel
+	// (see selectorTagged and TestFixtureQueriesLeaveNoUntaggedTraceOfLoadgen),
+	// except fixture/query.sh's own deliberate, untagged read, which
+	// agrees with LoadgenPathErrors' operator and grouping -- so the log
+	// has nothing left in it that could make this metric disagree with
+	// itself regardless of dashboards.
 
 	withDash := corpus.Build(fullSrc, names)
 	_, refusals := aggregate.Decide(inv, withDash, nil)
