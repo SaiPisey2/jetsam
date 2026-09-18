@@ -122,15 +122,9 @@ func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[str
 		// one consumer that touches this metric aggregates it down to a
 		// single series and needs no label at all -- collapsing 400 series
 		// to 1 is the correct answer for that consumer, not an accident.
-		// RuleName's leading colon (":m_total:sum") is the conventional
-		// rendering of an empty level in level:metric:operations, so the
-		// name stays idiomatic even at zero labels.
-		ruleName := strings.Join(keep, "_") + ":" + m.Name + ":" + op
-		if fn != "" {
-			// sum_rate5m, not sum_rate_5m: the function and its window read
-			// as one token, the same way Prometheus's own rules do it.
-			ruleName += "_" + fn + win
-		}
+		// See RuleName's own doc comment for why it, not this loop, owns the
+		// naming convention.
+		ruleName := RuleName(m.Name, keep, op, fn, win)
 
 		proposals = append(proposals, Proposal{
 			Metric:    m.Name,
@@ -144,6 +138,37 @@ func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[str
 	}
 
 	return proposals, refusals
+}
+
+// RuleName returns the conventional level:metric:operation name a rule
+// collapsing metric to keep under op -- further wrapped in fn over window,
+// when fn is set -- records under. Decide builds every Proposal's RuleName
+// by calling this, rather than by inlining the same string-building logic,
+// so that a consumer with only the finished Proposal in hand -- emit's
+// RenderRule, which never sees the Needs that produced it -- can recompute
+// the identical name from Proposal's own Metric/Keep/Op/Fn/Window and
+// refuse to write a rule whose declared name has drifted from what those
+// fields would actually record. Two implementations of this string that
+// happen to agree today are worse than one: the day they diverge, the
+// wrong one is silent, and a rule that looks entirely ordinary in a diff
+// records under a name nothing reads, or overwrites a name something else
+// does.
+//
+// keep is trusted to already be sorted, exactly as Proposal.Keep documents
+// it -- this function does not sort it again.
+func RuleName(metric string, keep []string, op, fn, window string) string {
+	// The leading colon (":m_total:sum") is the conventional rendering of
+	// an empty level in level:metric:operation, so the name stays
+	// idiomatic even when keep is empty -- a consumer that aggregates the
+	// metric down to a single series and needs no label at all is a real
+	// case, not an oversight.
+	name := strings.Join(keep, "_") + ":" + metric + ":" + op
+	if fn != "" {
+		// sum_rate5m, not sum_rate_5m: the function and its window read as
+		// one token, the same way Prometheus's own rules do it.
+		name += "_" + fn + window
+	}
+	return name
 }
 
 // refuse checks the causes in order and returns the first one that fires,

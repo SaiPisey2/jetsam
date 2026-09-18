@@ -28,8 +28,8 @@ var ruleParser = parser.NewParser(parser.Options{})
 // metric to one series, and the grouping clause is omitted entirely rather
 // than rendered as the meaningless "sum by () (...)".
 //
-// Two different things can make this rule unsafe to write, and both are
-// checked before anything touches the tree:
+// Every field p carries is checked before anything touches the tree, for
+// three different reasons:
 //
 //  1. p.Metric and p.RuleName are untrusted the same way a scraped metric
 //     name is untrusted anywhere else in this package -- see relabel.go.
@@ -37,25 +37,65 @@ var ruleParser = parser.NewParser(parser.Options{})
 //     set as a yaml.Node's Value, so a newline or a quote in either cannot
 //     inject YAML structure.
 //  2. That is not enough here, because the scalar being written is itself
-//     PromQL, not a passive string like a job name. A metric name carrying
-//     a quote or a bracket is a perfectly quotable YAML scalar and an
-//     unparseable expr at the same time -- and Prometheus refuses to load
-//     a whole rule file over one bad expr in it, so every OTHER rule
-//     already there stops evaluating because of a name jetsam wrote. The
-//     rendered expression is therefore parsed with the same PromQL parser
-//     the corpus uses before it is written, and RuleName is checked the
-//     same way: a valid record name is exactly a string that reads back as
-//     a bare selector naming itself.
+//     PromQL, not a passive string like a job name -- and parsing the
+//     ASSEMBLED expression afterward is not enough either, because a
+//     hostile p.Metric can close jetsam's own parenthesis and open one of
+//     its own, or open a "#" comment that swallows it, and the finished
+//     string still parses. "m_total) unless vector(1" as Metric renders
+//     "sum(m_total) unless vector(1)" -- a different query entirely, and a
+//     perfectly valid one. So p.Metric is checked the same way p.RuleName
+//     already is, BEFORE the two are ever combined: validMetricName
+//     requires it read back, on its own, as a bare selector naming itself.
+//     A legitimate metric that needs quoting (Prometheus 3's UTF-8 names
+//     can contain spaces or punctuation) is refused here rather than
+//     rendered -- jetsam has no quoted-selector rendering to fall back to,
+//     so refusing is the honest answer, not a verdict that the name is
+//     malformed.
+//  3. p.Op, p.Keep and p.RuleName can each be individually well-formed and
+//     still not agree with each other or with what Decide would have
+//     produced: an Op outside {sum, min, max} renders something that does
+//     not compose (or, for the empty string, no aggregation at all); a
+//     duplicate label in Keep renders the harmless-looking but false "by
+//     (path, path)"; and a RuleName that simply does not match what
+//     Metric/Keep/Op/Fn/Window would name looks like an ordinary rule in a
+//     diff while recording under a name nothing asked for. All three are
+//     rejected: Op against the fixed list Decide itself enforces, Keep by
+//     refusing a repeated label outright rather than silently deduping it,
+//     and RuleName by recomputing it with aggregate.RuleName -- the same
+//     function Decide calls -- and erroring on any disagreement.
+//
+// The rendered expression is still parsed with the same PromQL parser the
+// corpus uses, as a final check on the whole assembled string rather than
+// its parts individually.
 //
 // Refuses, rather than overwrites, when a rule already exists under
 // p.RuleName anywhere in the file: a same-named rule could be something an
 // operator wrote by hand, or something an earlier jetsam run recorded from
 // different inputs, and either way silently replacing it is worse than
 // declining the change.
+//
+// Like relabel.go's Render, the encoder is configured with SetIndent(2),
+// so a ruleYAML already written in the ordinary 2-space style round-trips
+// with only the added lines changed; one written at some other indent
+// width is renormalised to 2-space on output, because yaml.v3's node tree
+// does not record the original width, only structure and comments.
 func RenderRule(ruleYAML string, p aggregate.Proposal) (string, error) {
+	if p.Op != "sum" && p.Op != "min" && p.Op != "max" {
+		return "", fmt.Errorf("operator %q is not sum, min or max", p.Op)
+	}
+	if label, dup := duplicateLabel(p.Keep); dup {
+		return "", fmt.Errorf("keep label %q appears more than once", label)
+	}
+	if !validMetricName(p.Metric) {
+		return "", fmt.Errorf("metric name %q is not a plain identifier PromQL can select without quoting, and jetsam does not render a quoted selector", p.Metric)
+	}
 	if !validMetricName(p.RuleName) {
 		return "", fmt.Errorf("record name %q is not a valid metric name", p.RuleName)
 	}
+	if want := aggregate.RuleName(p.Metric, p.Keep, p.Op, p.Fn, p.Window); want != p.RuleName {
+		return "", fmt.Errorf("record name %q does not match what Metric, Keep, Op, Fn and Window would name (%q)", p.RuleName, want)
+	}
+
 	expr := renderExpr(p)
 	if _, err := ruleParser.ParseExpr(expr); err != nil {
 		return "", fmt.Errorf("rendered expr %q does not parse as PromQL: %w", expr, err)
@@ -164,13 +204,39 @@ func renderExpr(p aggregate.Proposal) string {
 	return fmt.Sprintf("%s by (%s) (%s)", p.Op, strings.Join(p.Keep, ", "), inner)
 }
 
-// validMetricName reports whether name is safe to write as a recording
-// rule's record field. Parsed back through the same parser Prometheus
-// itself uses, a valid one reads as a bare selector naming itself -- a
-// quote or a newline breaks the parse outright, and a name that instead
-// parses into something else entirely (a brace-qualified selector, a
-// selector with an offset) does not satisfy Name == name, so either way it
-// is rejected rather than written.
+// duplicateLabel reports the first label that appears more than once in
+// keep, and whether one exists. Real Decide output can never contain a
+// duplicate -- Required is built from a set's keys -- but RenderRule takes
+// nothing about Proposal on faith once it is in hand (the same "checked
+// anyway rather than trusted from a distance" discipline decide.go itself
+// uses on Op, for the same reason): a duplicate here would render the
+// harmless-looking, well-formed, and false "by (path, path)", so it is
+// rejected outright rather than silently deduplicated.
+func duplicateLabel(keep []string) (string, bool) {
+	seen := make(map[string]bool, len(keep))
+	for _, k := range keep {
+		if seen[k] {
+			return k, true
+		}
+		seen[k] = true
+	}
+	return "", false
+}
+
+// validMetricName reports whether name is safe to use, unquoted, as a bare
+// PromQL selector -- RenderRule calls it on both p.Metric and p.RuleName,
+// for two different failure modes it closes at once. Parsed back through
+// the same parser Prometheus itself uses, a valid name reads as a bare
+// selector naming itself: a quote, a newline, a stray parenthesis or
+// bracket, or a leading "-" either breaks the parse outright or parses into
+// something other than a plain selector on that name (a unary expression,
+// a brace-qualified selector, a selector with an offset), and any of those
+// fails Name == name. Checking the name ALONE, before it is ever combined
+// with anything else into a larger expression string, is what catches a
+// name built to close a parenthesis jetsam appended around it or open a
+// "#" comment that swallows the rest of that string -- parsing the finished
+// expression afterward could not distinguish that from an ordinary,
+// unrelated parse failure.
 func validMetricName(name string) bool {
 	if name == "" {
 		return false

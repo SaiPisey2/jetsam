@@ -154,8 +154,8 @@ const sampleRuleYAML = `groups:
   - name: existing
     rules:
       # an operator's own rule, unrelated to anything jetsam adds
-      - record: instance:up:count
-        expr: count by (instance) (up)
+      - record: instance:up:sum
+        expr: sum by (instance) (up)
 `
 
 // TestRenderRuleAddsToAnExistingGroupWithoutDisturbingIt asks RenderRule to
@@ -177,8 +177,8 @@ func TestRenderRuleAddsToAnExistingGroupWithoutDisturbingIt(t *testing.T) {
 	if !strings.Contains(got, "an operator's own rule") {
 		t.Fatalf("pre-existing comment lost:\n%s", got)
 	}
-	existing := findRule(t, got, "instance:up:count")
-	if existing.Expr != "count by (instance) (up)" {
+	existing := findRule(t, got, "instance:up:sum")
+	if existing.Expr != "sum by (instance) (up)" {
 		t.Fatalf("pre-existing rule was disturbed: expr = %q", existing.Expr)
 	}
 	added := findRule(t, got, p.RuleName)
@@ -191,13 +191,17 @@ func TestRenderRuleAddsToAnExistingGroupWithoutDisturbingIt(t *testing.T) {
 // proposal would name its own rule, and expects a refusal rather than a
 // silent overwrite -- overwriting an existing rule of the same name could
 // silently replace something an operator wrote by hand, or something an
-// earlier jetsam run already recorded with different inputs.
+// earlier jetsam run already recorded with different inputs. Metric, Keep
+// and Op are chosen to agree with RuleName (aggregate.RuleName("up",
+// []string{"instance"}, "sum", "", "") is exactly "instance:up:sum"), so
+// this test exercises the collision refusal itself rather than tripping
+// the unrelated name-agreement check first.
 func TestRenderRuleRefusesANameCollision(t *testing.T) {
 	p := aggregate.Proposal{
-		Metric:   "m_total",
+		Metric:   "up",
 		Keep:     []string{"instance"},
-		Op:       "count",
-		RuleName: "instance:up:count",
+		Op:       "sum",
+		RuleName: "instance:up:sum",
 	}
 	if _, err := RenderRule(sampleRuleYAML, p); err == nil {
 		t.Fatal("RenderRule accepted a rule name that already exists, want an error")
@@ -277,5 +281,112 @@ func TestRenderRuleExpressionsRoundTripThroughPromQL(t *testing.T) {
 		}
 		rule := findRule(t, got, p.RuleName)
 		mustParsePromQL(t, rule.Expr)
+	}
+}
+
+// TestRenderRuleRejectsAMetricThatEscapesItsOwnParens is the sharp
+// regression test for validating p.Metric on its own, before it is ever
+// combined into the assembled expression: parsing the FINISHED string does
+// not catch a metric name built to close jetsam's own aggregation
+// parenthesis and open one of its own, or open a "#" comment that swallows
+// the rest of the line, or read as unary negation of some other metric --
+// every one of these renders a string that parses as valid, unrelated
+// PromQL, which is exactly what makes them dangerous under an innocuous
+// record name.
+//
+// RuleName here ("x:m:sum") deliberately does not match what
+// aggregate.RuleName would compute from these metrics, so on its own this
+// test does not isolate the Metric check: removing just that check still
+// leaves this test passing, because the separate RuleName/expression
+// agreement check also rejects the result, for an unrelated reason (the
+// name it computes from the hostile metric disagrees with "x:m:sum"). The
+// two checks overlap here only because every character that lets a Metric
+// escape its own parentheses also breaks RuleName's own concatenation of
+// that same Metric. The Metric check is still independently required --
+// without it, a caller has no defence against a hostile Metric paired
+// with a RuleName an attacker crafted rather than derived, and this test
+// names the actual defect directly rather than through an unrelated
+// name-mismatch message. See the commit's mutation test for how the Metric
+// check is verified in true isolation (by removing the agreement check
+// alongside it, to reproduce the un-mitigated PoC exactly).
+func TestRenderRuleRejectsAMetricThatEscapesItsOwnParens(t *testing.T) {
+	cases := []struct {
+		name   string
+		metric string
+	}{
+		{"closes the paren and opens a different query", "m_total) unless vector(1"},
+		{"closes the paren and comments out the rest", "m_total)#"},
+		{"parses as unary negation, not a metric", "-m_total"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := aggregate.Proposal{
+				Metric:   tc.metric,
+				Op:       "sum",
+				RuleName: "x:m:sum",
+			}
+			if _, err := RenderRule("", p); err == nil {
+				t.Fatalf("RenderRule accepted metric %q, want an error", tc.metric)
+			}
+		})
+	}
+}
+
+// TestRenderRuleRejectsAnInvalidOperator covers both an operator Decide
+// would never produce (count does not compose under partial aggregation)
+// and the zero value, which would otherwise render with no aggregation
+// applied at all -- "(m_total)" wrapped in nothing rather than sum(...).
+func TestRenderRuleRejectsAnInvalidOperator(t *testing.T) {
+	for _, op := range []string{"", "count", "avg"} {
+		t.Run("op="+op, func(t *testing.T) {
+			p := aggregate.Proposal{
+				Metric:   "m_total",
+				Keep:     []string{"path"},
+				Op:       op,
+				RuleName: "path:m_total:" + op,
+			}
+			if _, err := RenderRule("", p); err == nil {
+				t.Fatalf("RenderRule accepted operator %q, want an error", op)
+			}
+		})
+	}
+}
+
+// TestRenderRuleRejectsARuleNameThatDisagreesWithItsFields covers a
+// Proposal whose RuleName does not describe what its own Metric, Keep, Op,
+// Fn and Window would actually record. Nothing about this shape is
+// individually malformed -- RuleName parses as a fine metric name, Op is
+// sum, Keep is just "path" -- so a check that only validated each field on
+// its own would let it through, and the rendered rule would look entirely
+// ordinary in a diff while recording under a name nothing else names.
+func TestRenderRuleRejectsARuleNameThatDisagreesWithItsFields(t *testing.T) {
+	p := aggregate.Proposal{
+		Metric:   "m_total",
+		Keep:     []string{"path"},
+		Op:       "sum",
+		RuleName: "totally_unrelated",
+	}
+	if _, err := RenderRule("", p); err == nil {
+		t.Fatal("RenderRule accepted a RuleName that disagrees with Metric/Keep/Op/Fn/Window, want an error")
+	}
+}
+
+// TestRenderRuleRejectsADuplicateKeepLabel covers a Keep slice with a
+// repeated label. Decide's own Required is built from a set's keys and can
+// never contain one, but RenderRule does not trust that invariant from a
+// distance: a duplicate would render the well-formed, harmless-looking,
+// and false "by (path, path)". RuleName is built to agree with the
+// duplicated Keep (aggregate.RuleName joins it verbatim) so this test
+// isolates the duplicate-label check rather than incidentally tripping the
+// name-agreement check instead.
+func TestRenderRuleRejectsADuplicateKeepLabel(t *testing.T) {
+	p := aggregate.Proposal{
+		Metric:   "m_total",
+		Keep:     []string{"path", "path"},
+		Op:       "sum",
+		RuleName: "path_path:m_total:sum",
+	}
+	if _, err := RenderRule("", p); err == nil {
+		t.Fatal("RenderRule accepted a duplicate Keep label, want an error")
 	}
 }
