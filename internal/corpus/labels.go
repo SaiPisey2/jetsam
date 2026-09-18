@@ -47,9 +47,17 @@ var composes = map[parser.ItemType]bool{
 // grouping alone would silently strip labels a dashboard displays.
 // Op.IsAggregatorWithParam() does not help either: it is true for quantile,
 // which collapses, as well as for topk, which does not.
+//
+// count_values belongs here for a different reason: it invents a label from
+// each sample's VALUE, and that value is only stable over the raw series.
+// Pre-collapsing any other label by summing at the source changes what gets
+// merged, and so changes the count -- silently, which is exactly the failure
+// this file exists to prevent. A `by` or `without` clause on count_values
+// does not bound what it needs; it still needs every label of the source.
 var preservesEverySeries = map[parser.ItemType]bool{
-	parser.TOPK:    true,
-	parser.BOTTOMK: true,
+	parser.TOPK:         true,
+	parser.BOTTOMK:      true,
+	parser.COUNT_VALUES: true,
 }
 
 // LabelsNeeded reports what query needs from metric.
@@ -108,9 +116,22 @@ func LabelsNeeded(query, metric string) (LabelNeed, error) {
 			if v.VectorMatching == nil {
 				return nil
 			}
-			for _, l := range v.VectorMatching.MatchingLabels {
-				req[l] = true
+			if v.VectorMatching.On {
+				// on (x): matching happens ON x, so x must survive.
+				for _, l := range v.VectorMatching.MatchingLabels {
+					req[l] = true
+				}
+			} else if len(v.VectorMatching.MatchingLabels) > 0 {
+				// ignoring (x): matching happens on every label EXCEPT x, so
+				// x is the one label that need not agree -- a complement,
+				// same as `without`, which LabelNeed cannot express as a
+				// set. Refuse rather than under-report.
+				need.All = true
 			}
+			// group_left/right(x) COPIES x from the many-side onto the
+			// result, unlike MatchingLabels which only says what must
+			// agree. Include is never a complement, on or ignoring alike,
+			// so it is always required.
 			for _, l := range v.VectorMatching.Include {
 				req[l] = true
 			}

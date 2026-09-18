@@ -95,6 +95,35 @@ func TestLabelsNeeded(t *testing.T) {
 			query: `sum by (path) (some_other_total)`,
 			want:  LabelNeed{Required: nil},
 		},
+		{
+			// count_values invents a label from each sample's VALUE, and
+			// that value is only stable over the raw series. Pre-collapsing
+			// any other label at the source changes what gets merged and so
+			// changes the count -- silently. A bare call has no grouping at
+			// all, so before the fix it looked identical to sum()'s
+			// empty-grouping case and wrongly reported needing nothing.
+			name:  "count_values requires every label even with no grouping",
+			query: `count_values("v", jetsam_demo_requests_total)`,
+			want:  LabelNeed{All: true, Op: "count_values", OpSafe: false},
+		},
+		{
+			// Before the fix this fell into the generic `by` path and
+			// reported Required: [pod], looking like a legitimate finding
+			// instead of an unanalysable one.
+			name:  "count_values requires every label despite a by clause",
+			query: `count_values("v", jetsam_demo_requests_total) by (pod)`,
+			want:  LabelNeed{All: true, Op: "count_values", OpSafe: false},
+		},
+		{
+			name:  "count_values requires every label under without too",
+			query: `count_values("v", jetsam_demo_requests_total) without (pod)`,
+			want:  LabelNeed{All: true, Op: "count_values", OpSafe: false},
+		},
+		{
+			name:  "ignoring excludes the named label rather than requiring it",
+			query: `sum by (path) (jetsam_demo_requests_total) / ignoring (pod) other_total`,
+			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
