@@ -333,3 +333,59 @@ func TestUnreferencedReasonNamesWhyTheLogDoesNotHelp(t *testing.T) {
 		}
 	}
 }
+
+// TestUnqueriedReasonDoesNotClaimADashboardSearchThatDidNotHappen: this is
+// the row that proposes a deletion, and it asserted "no rule or dashboard
+// reads it" on installs where grafana.url is unset and no dashboard was
+// ever consulted -- while the header two lines above correctly said the
+// queries came from rules and the query log alone. Exactly the cross-layer
+// contradiction the used-reason fix was raised for, in the configuration
+// the query log's blind spot already makes dangerous.
+func TestUnqueriedReasonDoesNotClaimADashboardSearchThatDidNotHappen(t *testing.T) {
+	inv := inventory.Build(promapi.Status{Counts: map[string]int{"unread_metric": 400}, HeadSeries: 400})
+	log := func() *querylog.Reading {
+		return &querylog.Reading{Queries: []string{"other_metric"}, Span: 800 * time.Hour}
+	}
+
+	withDashboards := corpus.Build(corpus.Sources{
+		QueryLog: log(), LogQualifies: true,
+		DashboardsConfigured: true, DashboardsReachable: true,
+	}, []string{"unread_metric", "other_metric"})
+	noDashboards := corpus.Build(corpus.Sources{
+		QueryLog: log(), LogQualifies: true,
+	}, []string{"unread_metric", "other_metric"})
+
+	reasonFor := func(c corpus.Corpus) string {
+		for _, v := range Compute(inv, c).Verdicts {
+			if v.Metric == "unread_metric" {
+				if v.Grade != GradeUnqueried {
+					t.Fatalf("test setup: Grade = %q, want %q", v.Grade, GradeUnqueried)
+				}
+				return v.Reason
+			}
+		}
+		t.Fatal("test setup: unread_metric has no verdict")
+		return ""
+	}
+
+	const want = "no rule or dashboard reads it and no logged query read it in the window"
+	if got := reasonFor(withDashboards); got != want {
+		t.Errorf("dashboards consulted: Reason = %q, want %q", got, want)
+	}
+	const wantNoDash = "no rule reads it and no logged query read it in the window"
+	if got := reasonFor(noDashboards); got != wantNoDash {
+		t.Errorf("no dashboards consulted: Reason = %q, want %q", got, wantNoDash)
+	}
+}
+
+// TestUnqueriedReasonDoesNotCreditAnUnreachableGrafana: configured but
+// unfetchable dashboards contributed nothing, so the sentence must not
+// claim they were searched either. (Nothing is droppable in this state, so
+// the reason reaching a reader is the blocked one -- this asserts the
+// phrase the corpus would supply, via the same predicate.)
+func TestUnqueriedReasonDoesNotCreditAnUnreachableGrafana(t *testing.T) {
+	c := corpus.Build(corpus.Sources{DashboardsConfigured: true}, nil)
+	if c.DashboardsRead() {
+		t.Error("DashboardsRead = true although Grafana was configured and unreachable")
+	}
+}

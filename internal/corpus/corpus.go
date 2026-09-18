@@ -216,12 +216,32 @@ func (c Corpus) LogEndText() string {
 	return c.LogEnd.UTC().Format(time.RFC3339)
 }
 
+// DashboardsRead reports whether dashboard evidence actually contributed.
+// Configured-but-unreachable contributed nothing, so it counts as not
+// consulted -- the one predicate behind every sentence that mentions
+// dashboards, so no two of them can disagree about whether a dashboard was
+// ever looked at.
+func (c Corpus) DashboardsRead() bool {
+	return c.DashboardsConfigured && c.DashboardsReachable
+}
+
+// Readers names the sources a "nothing reads it" sentence is entitled to
+// claim it checked. Saying "no rule or dashboard reads it" on an install
+// with no grafana.url asserts a search that never happened, on the row
+// that proposes a deletion.
+func (c Corpus) Readers() string {
+	if c.DashboardsRead() {
+		return "rule or dashboard"
+	}
+	return "rule"
+}
+
 // SourceList names the evidence sources that actually contributed queries,
 // for the sentence that quotes Queries. Naming a source that is not
 // configured overstates the corpus to the person approving a deletion.
 func (c Corpus) SourceList() string {
 	parts := []string{"rules"}
-	if c.DashboardsConfigured && c.DashboardsReachable {
+	if c.DashboardsRead() {
 		parts = append(parts, "dashboards")
 	}
 	if c.LogRead {

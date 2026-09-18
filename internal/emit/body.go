@@ -275,9 +275,9 @@ func Body(drops []Drop, res verdict.Result, c corpus.Corpus, inv inventory.Inven
 
 	if len(unreferenced) > 0 {
 		fmt.Fprintf(&b, "> [!WARNING]\n> **%d metric(s) below rest on \"unreferenced\" grade, not \"unqueried\".** "+
-			"They are not referenced by any rule or dashboard, but %s, so jetsam cannot see ad-hoc or Grafana "+
+			"They are not referenced by any %s, but %s, so jetsam cannot see ad-hoc or Grafana "+
 			"Explore queries against them. `-include-unreferenced` was passed, and the operator who ran it has "+
-			"chosen to accept that risk.\n\n", len(unreferenced), c.LogShortfall())
+			"chosen to accept that risk.\n\n", len(unreferenced), c.Readers(), c.LogShortfall())
 	}
 
 	if len(unqueried) > 0 {

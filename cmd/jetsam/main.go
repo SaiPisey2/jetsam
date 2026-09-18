@@ -505,8 +505,8 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 					// is that every metric is already accounted for by a
 					// rule, a dashboard, or the log itself, not that evidence
 					// is missing.
-					fmt.Fprintln(stdout, "every metric is already referenced by a rule or dashboard, or was read "+
-						"within the query log's window -- there is nothing unread to propose dropping.")
+					fmt.Fprintf(stdout, "every metric is already referenced by a %s, or was read "+
+						"within the query log's window -- there is nothing unread to propose dropping.\n", cor.Readers())
 				case cor.LogRead && !cor.LogQualifies:
 					fmt.Fprintf(stdout, "query_log.path is configured, but its log only covers %s -- not long enough "+
 						"to license a drop -- so jetsam cannot tell \"no rule mentions this\" apart from \"nobody reads "+
@@ -555,9 +555,9 @@ func proposeCmd(args []string, stdout, stderr io.Writer, getenv func(string) str
 		// see corpus.Corpus.LogShortfall. This said "jetsam has no query
 		// log" flatly, which was wrong on every install whose log was
 		// configured and merely short of the window.
-		fmt.Fprintf(stdout, "-include-unreferenced is set: %d metric(s) below are not referenced by any rule or "+
-			"dashboard, but %s, so jetsam cannot see ad-hoc or Grafana Explore queries against them. "+
-			"You have accepted that risk.\n\n", len(unreferenced), cor.LogShortfall())
+		fmt.Fprintf(stdout, "-include-unreferenced is set: %d metric(s) below are not referenced by any %s, "+
+			"but %s, so jetsam cannot see ad-hoc or Grafana Explore queries against them. "+
+			"You have accepted that risk.\n\n", len(unreferenced), cor.Readers(), cor.LogShortfall())
 	}
 
 	newYAML, err := emit.Render(string(promYAML), drops)

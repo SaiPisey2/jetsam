@@ -56,7 +56,7 @@ func Scan(w io.Writer, inv inventory.Inventory, c corpus.Corpus, res verdict.Res
 			// on every install whose log was configured and short.
 			fmt.Fprintf(w, "Droppable  none -- %s, so ad-hoc reads are invisible\n", c.LogShortfall())
 		default:
-			fmt.Fprintln(w, "Droppable  none -- every metric is referenced by a rule or dashboard, or was read within the query-log window")
+			fmt.Fprintf(w, "Droppable  none -- every metric is referenced by a %s, or was read within the query-log window\n", c.Readers())
 		}
 	}
 	// Blocked entries quote a rule's group, name and parse error, all

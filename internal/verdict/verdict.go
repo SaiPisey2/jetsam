@@ -3,6 +3,7 @@
 package verdict
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/SaiPisey2/jetsam/internal/corpus"
@@ -111,7 +112,11 @@ func Compute(inv inventory.Inventory, c corpus.Corpus) Result {
 			v.Reason = "nothing known reads it; " + c.LogShortfall() + ", so ad-hoc reads are invisible"
 		default:
 			v.Grade = GradeUnqueried
-			v.Reason = "no rule or dashboard reads it and no logged query read it in the window"
+			// "or dashboard" only when a dashboard was actually
+			// consulted. This is the row that proposes a deletion, and on
+			// an install with no grafana.url the unconditional wording
+			// asserted a search that never happened.
+			v.Reason = fmt.Sprintf("no %s reads it and no logged query read it in the window", c.Readers())
 			v.Droppable = true
 		}
 
