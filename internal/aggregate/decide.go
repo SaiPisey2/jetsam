@@ -49,6 +49,19 @@ type Proposal struct {
 	// that asks a human to approve the collapse, the same way it fills in
 	// KeptSeries from a count query.
 	Consumers []Consumer
+	// Caveats names something Decide judged safe to propose anyway, but
+	// that the person approving it should see before acting on the
+	// numbers. Today the only source is corpus.FromLog: a query the
+	// query log recorded is a historical event, not a standing consumer
+	// -- it ran once, possibly weeks ago, and its label requirements
+	// already entered need's union in corpus.Build, so the safety proof
+	// this package exists to make is untouched by it. What it costs is
+	// only the guarantee that RE-RUNNING that exact query later returns
+	// the same numbers, which is the operator's call to make once this
+	// is advisory-only and nothing gets applied without them reading it
+	// first -- unlike corpus.FromDashboard, which keeps reading for as
+	// long as the dashboard exists and stays a hard refusal in refuse().
+	Caveats []string
 }
 
 // Consumer names one thing that reads a proposed metric, for the pull
@@ -69,10 +82,12 @@ type Refusal struct {
 }
 
 // Decide walks every metric in inv that the corpus has a Needs entry for,
-// and proposes collapsing it when the corpus's own evidence is complete,
-// nothing jetsam cannot rewrite reads it, it is not itself a recording
+// and proposes collapsing it when the corpus's own evidence is complete, no
+// dashboard jetsam cannot rewrite reads it, it is not itself a recording
 // rule's output, and every consumer agrees on both the label set and the
-// operator.
+// operator. A metric a logged query also read is still proposed -- see
+// Proposal.Caveats -- because that query is a historical event, not a
+// standing consumer the way a dashboard is.
 //
 // A metric with no Needs entry is skipped, not refused: absence means
 // nothing in the corpus touches it at all, which is the drop path's
@@ -82,14 +97,12 @@ type Refusal struct {
 //
 // dashboardConsumers names, for a metric a dashboard reads, the dashboards
 // that read it, so the refusal can name them. It is not the only source of
-// an unrewritable read, though: c.UsedBy also carries FromDashboard and
-// FromLog bits, and a logged ad-hoc query is exactly as unrewritable as a
-// dashboard panel -- it passes the label-union test today and breaks the
-// moment anyone re-runs it once the raw series are gone. So both are
-// checked independently, and dashboardConsumers is kept only to name the
-// blocking dashboards when it can. Neither one, though, can see a read that
-// never made it into the corpus at all -- see the evidence-completeness
-// check inside refuse.
+// a dashboard read, though: c.UsedBy also carries a FromDashboard bit for a
+// dashboard read that never made it into dashboardConsumers (an unparseable
+// panel, say), and that bit is checked independently so dashboardConsumers
+// missing an entry never gets read as permission. Neither one, though, can
+// see a read that never made it into the corpus at all -- see the
+// evidence-completeness check inside refuse.
 func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[string][]string) ([]Proposal, []Refusal) {
 	var proposals []Proposal
 	var refusals []Refusal
@@ -126,6 +139,19 @@ func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[str
 		// naming convention.
 		ruleName := RuleName(m.Name, keep, op, fn, win)
 
+		var caveats []string
+		if c.UsedBy[m.Name]&corpus.FromLog != 0 {
+			// See Proposal.Caveats' own doc comment for why this is a
+			// caveat, not a refusal: the query log records what someone
+			// ran once, not what keeps running, and its label
+			// requirements are already folded into need above -- what is
+			// NOT proven is that re-running that exact query later still
+			// returns what it did.
+			caveats = append(caveats, "queried ad hoc within the query log's window: jetsam cannot rewrite a "+
+				"query it only saw in a log, and whoever ran it will find their saved query no longer returns "+
+				"what it did once this collapses the raw series")
+		}
+
 		proposals = append(proposals, Proposal{
 			Metric:    m.Name,
 			Keep:      keep,
@@ -134,6 +160,7 @@ func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[str
 			Window:    win,
 			RawSeries: m.Series,
 			RuleName:  ruleName,
+			Caveats:   caveats,
 		})
 	}
 
@@ -210,9 +237,18 @@ func refuse(metric string, need corpus.MetricNeed, c corpus.Corpus, dashboardCon
 	if c.UsedBy[metric]&corpus.FromDashboard != 0 {
 		return "read by a dashboard jetsam cannot rewrite", true
 	}
-	if c.UsedBy[metric]&corpus.FromLog != 0 {
-		return "read by a query in the query log, which jetsam cannot rewrite", true
-	}
+	// corpus.FromLog is deliberately NOT checked here. A dashboard keeps
+	// reading for as long as it exists and jetsam cannot edit Grafana, so
+	// it stays a hard refusal above -- but a query the query log recorded
+	// is a historical event, not a standing consumer: it ran once,
+	// possibly weeks ago, and its label requirements already entered
+	// need's union in corpus.Build, so the safety proof this function
+	// exists to make does not depend on it. What a logged reader costs is
+	// only the guarantee that re-running that exact query later returns
+	// the same numbers -- under this package's advisory-only contract
+	// (nothing is ever applied without a human reading it first), that is
+	// the operator's call to make with the fact in front of them, so
+	// Decide records it on Proposal.Caveats instead of refusing here.
 	if need.All {
 		// need.All means jetsam's requirement is "every label must survive",
 		// which is NOT the same claim as "some consumer needs every label":

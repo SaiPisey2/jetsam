@@ -156,19 +156,43 @@ func TestRuleNameSortsItsLabels(t *testing.T) {
 	}
 }
 
-// Checking dashboardConsumers alone would miss this: a logged ad-hoc query
-// is exactly as unrewritable as a dashboard panel, so Decide must also
-// refuse on corpus.FromLog in UsedBy, even when no dashboard names the
-// metric.
-func TestAMetricTheQueryLogReadIsRefused(t *testing.T) {
+// TestAMetricTheQueryLogReadIsProposedWithACaveat pins the ruling that
+// replaced this test's old name (TestAMetricTheQueryLogReadIsRefused): a
+// logged query is a historical event, not a standing consumer, so it must
+// not cost the whole proposal the way a dashboard read does. Its label
+// requirements are already in need's union (via corpus.Build), so Decide
+// still proposes the metric -- it just carries a caveat naming the risk a
+// human approving this needs to see: re-running that exact query later
+// will not return what it did.
+func TestAMetricTheQueryLogReadIsProposedWithACaveat(t *testing.T) {
 	c := corpus.Corpus{
 		Used:   map[string]bool{"m_total": true},
 		UsedBy: map[string]corpus.Source{"m_total": corpus.FromRule | corpus.FromLog},
 		Needs:  map[string]corpus.MetricNeed{"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true}},
 	}
-	_, refs := Decide(inv("m_total", 400), c, nil)
-	if len(refs) != 1 || !strings.Contains(refs[0].Reason, "query log") {
-		t.Fatalf("refusals = %v, want one naming the query log", refs)
+	props, refs := Decide(inv("m_total", 400), c, nil)
+	if len(refs) != 0 {
+		t.Fatalf("refusals = %v, want none -- a logged read is a caveat, not a refusal", refs)
+	}
+	if len(props) != 1 {
+		t.Fatalf("got %d proposals, want 1", len(props))
+	}
+	if len(props[0].Caveats) != 1 || !strings.Contains(props[0].Caveats[0], "log") {
+		t.Fatalf("Caveats = %v, want one naming the query log", props[0].Caveats)
+	}
+}
+
+// TestAMetricNeitherLoggedNorDashboardReadCarriesNoCaveat: the caveat must
+// not appear on a proposal nothing logged ever touched.
+func TestAMetricNeitherLoggedNorDashboardReadCarriesNoCaveat(t *testing.T) {
+	c := corpus.Corpus{
+		Used:   map[string]bool{"m_total": true},
+		UsedBy: map[string]corpus.Source{"m_total": corpus.FromRule},
+		Needs:  map[string]corpus.MetricNeed{"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true}},
+	}
+	props, _ := Decide(inv("m_total", 400), c, nil)
+	if len(props) != 1 || len(props[0].Caveats) != 0 {
+		t.Fatalf("props = %+v, want one proposal with no caveats", props)
 	}
 }
 
@@ -184,6 +208,58 @@ func TestAMetricUsedByDashboardWithNoNameIsStillRefused(t *testing.T) {
 	_, refs := Decide(inv("m_total", 400), c, map[string][]string{})
 	if len(refs) != 1 {
 		t.Fatalf("want a refusal, got %v", refs)
+	}
+}
+
+// TestFromDashboardAloneStillRefusesAfterTheLogRulingChanged is a direct
+// regression pin for the ruling in this round: removing the FromLog refusal
+// must not have weakened the FromDashboard one it sits next to in refuse().
+func TestFromDashboardAloneStillRefusesAfterTheLogRulingChanged(t *testing.T) {
+	c := corpus.Corpus{
+		Used:   map[string]bool{"m_total": true},
+		UsedBy: map[string]corpus.Source{"m_total": corpus.FromRule | corpus.FromDashboard},
+		Needs:  map[string]corpus.MetricNeed{"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true}},
+	}
+	props, refs := Decide(inv("m_total", 400), c, nil)
+	if len(props) != 0 || len(refs) != 1 || !strings.Contains(refs[0].Reason, "dashboard") {
+		t.Fatalf("got %d proposals and refusals %v, want exactly one refusal naming the dashboard", len(props), refs)
+	}
+}
+
+// TestBothDashboardAndLogBitsRefuseForTheDashboardInTheSameRun exercises
+// both paths together in one Decide call: a metric read by both a
+// dashboard and the query log must still refuse -- for the dashboard,
+// which keeps reading for as long as it exists -- while a second, log-only
+// metric in the SAME run still gets proposed with its caveat. The two
+// behaviours must not interfere with each other.
+func TestBothDashboardAndLogBitsRefuseForTheDashboardInTheSameRun(t *testing.T) {
+	inv2 := inventory.Inventory{
+		Metrics: []inventory.Metric{
+			{Name: "dash_and_log", Series: 400},
+			{Name: "log_only", Series: 400},
+		},
+		TotalSeries: 800,
+	}
+	need := corpus.MetricNeed{Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true}
+	c := corpus.Corpus{
+		Used: map[string]bool{"dash_and_log": true, "log_only": true},
+		UsedBy: map[string]corpus.Source{
+			"dash_and_log": corpus.FromRule | corpus.FromDashboard | corpus.FromLog,
+			"log_only":     corpus.FromRule | corpus.FromLog,
+		},
+		Needs: map[string]corpus.MetricNeed{"dash_and_log": need, "log_only": need},
+	}
+
+	props, refs := Decide(inv2, c, nil)
+
+	if len(refs) != 1 || refs[0].Metric != "dash_and_log" || !strings.Contains(refs[0].Reason, "dashboard") {
+		t.Fatalf("refusals = %v, want exactly one refusing dash_and_log for the dashboard", refs)
+	}
+	if len(props) != 1 || props[0].Metric != "log_only" {
+		t.Fatalf("proposals = %+v, want exactly one, for log_only", props)
+	}
+	if len(props[0].Caveats) != 1 {
+		t.Fatalf("log_only's Caveats = %v, want one naming the query log", props[0].Caveats)
 	}
 }
 

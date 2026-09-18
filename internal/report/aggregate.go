@@ -68,12 +68,14 @@ save these series would have nothing left to read -- the saving this
 reports is only real one layer upstream of Prometheus (a collector, or
 stream aggregation), never as a drop added to a scrape config.`
 
-// Aggregate writes the aggregate report: for each metric named, its raw and
-// aggregated series counts, the labels kept and the labels dropped, the
-// operator and range function, the rendered recording rule, and each
-// consumer with its query before and after -- then every refusal, the way
-// Scan lists a blocked rule. See notAppliedNotice's own doc comment for why
-// the line it prints comes first and unconditionally.
+// Aggregate writes the aggregate report: for each metric named, any caveat
+// on it, its raw and aggregated series counts, the labels kept and the
+// labels dropped, the operator and range function, the rendered recording
+// rule, and each consumer with its query before and after -- then every
+// refusal, the way Scan lists a blocked rule. See notAppliedNotice's own
+// doc comment for why that line comes first and unconditionally, and
+// writeFinding for why a caveat comes right after the metric's own headline
+// numbers rather than at the end.
 func Aggregate(w io.Writer, findings []AggregateFinding, refusals []aggregate.Refusal) {
 	fmt.Fprintln(w, notAppliedNotice)
 	fmt.Fprintln(w)
@@ -103,6 +105,15 @@ func writeFinding(w io.Writer, f AggregateFinding) {
 	p := f.Proposal
 	saved := p.RawSeries - p.KeptSeries
 	fmt.Fprintf(w, "%s: %d series -> %d kept (saves %d)\n", safe.Text(p.Metric), p.RawSeries, p.KeptSeries, saved)
+
+	// Caveats come immediately after the headline numbers, before keeps/
+	// drops/op/rule -- deliberately the first thing printed about this
+	// metric, not appended at the end where a reader who acts on the
+	// numbers above could miss it. See aggregate.Proposal.Caveats' own doc
+	// comment for what can land here today (a logged, not standing, read).
+	for _, c := range p.Caveats {
+		fmt.Fprintf(w, "  CAVEAT: %s\n", safe.Text(c))
+	}
 
 	keep := "(none -- every consumer collapses it to a single series)"
 	if len(p.Keep) > 0 {

@@ -97,6 +97,42 @@ func TestAggregateStatesTheSeriesCountsLabelsAndOperator(t *testing.T) {
 	}
 }
 
+// TestAggregateShowsACaveatProminently pins the ruling that replaced the
+// query-log refusal: a metric a logged query also read is still proposed,
+// but the caveat naming that must appear right alongside the numbers --
+// before the keep/drop/op detail -- not merely somewhere in the report,
+// since a reader must not be able to act on the series counts without
+// seeing it first.
+func TestAggregateShowsACaveatProminently(t *testing.T) {
+	f := sampleFinding()
+	f.Proposal.Caveats = []string{"queried ad hoc within the query log's window: jetsam cannot rewrite a query it only saw in a log"}
+
+	var b bytes.Buffer
+	Aggregate(&b, []AggregateFinding{f}, nil)
+	out := b.String()
+
+	if !strings.Contains(out, "query log's window") {
+		t.Fatalf("report does not carry the caveat text:\n%s", out)
+	}
+
+	headline := strings.Index(out, "http_requests_total: 400 series")
+	caveat := strings.Index(out, "query log's window")
+	keeps := strings.Index(out, "keeps:")
+	if headline < 0 || caveat < 0 || keeps < 0 || !(headline < caveat && caveat < keeps) {
+		t.Errorf("caveat is not positioned between the headline numbers and the keep/drop detail:\n%s", out)
+	}
+}
+
+// TestAggregateWithoutACaveatPrintsNone: a proposal with no caveats must
+// not gain a spurious one.
+func TestAggregateWithoutACaveatPrintsNone(t *testing.T) {
+	var b bytes.Buffer
+	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil)
+	if strings.Contains(b.String(), "CAVEAT") {
+		t.Errorf("report shows a caveat for a proposal that carries none:\n%s", b.String())
+	}
+}
+
 // TestAggregateNamesWhatIsRemoved: a reader must not have to infer from the
 // kept labels alone that everything else about the metric is gone.
 func TestAggregateNamesWhatIsRemoved(t *testing.T) {

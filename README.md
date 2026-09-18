@@ -103,8 +103,11 @@ A metric only earns a name here when jetsam has actually measured the
 saving against your Prometheus, every consumer of it is a rule agreeing on
 the same operator and labels, and the saving clears
 `aggregate.min_series_saved` (100 by default). Anything else is refused,
-with the reason -- read by a dashboard or a logged query jetsam cannot
-rewrite, consumers that disagree, or a metric no rule aggregates at all.
+with the reason -- read by a dashboard jetsam cannot rewrite, consumers
+that disagree, or a metric no rule aggregates at all. A metric your query
+log recorded a read of is still proposed, not refused: that read is a
+historical event, not a standing consumer, and its caveat is printed right
+alongside the numbers, before the detail -- see Limits.
 
 ## Limits
 
@@ -168,13 +171,13 @@ rewrite, consumers that disagree, or a metric no rule aggregates at all.
   1374-metric instance, resolving every candidate returned by
   `-include-unreferenced` takes about 26 seconds -- this runs concurrently,
   not one query at a time.
-- **`aggregate` refuses a metric your own query log merely re-logged.**
-  Prometheus' query log records every rule evaluation, not only ad-hoc
-  reads, so a metric a rule already aggregates cleanly can still show up
-  there under the rule's own text. jetsam cannot tell that apart from a
-  genuine ad-hoc query with the same text, and refuses on either -- so a
-  qualifying query log can withhold more from `aggregate` than it does
-  from `propose`.
+- **A dashboard refuses `aggregate`; a logged query only caveats it.** A
+  dashboard keeps reading for as long as it exists and jetsam cannot edit
+  Grafana, so it withholds the proposal outright. A query the log recorded
+  is a historical event, not a standing consumer -- its labels already
+  count toward the safety check, so `aggregate` still proposes the metric
+  and names the query in a caveat instead: re-running it later is not
+  guaranteed to return what it did.
 
 ## License
 

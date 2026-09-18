@@ -809,23 +809,32 @@ func aggregateCmd(args []string, stdout, stderr io.Writer, getenv func(string) s
 }
 
 // withholdReason reports why a measured proposal must not be printed, or ""
-// when it should be. minSaved is cfg.Aggregate.MinSeriesSaved, passed as a
-// plain int rather than read from cfg so the two checks below can be pinned
-// independently against a value config.Load itself can never produce (Load
-// treats min_series_saved: 0 as "unset" and replaces it with the default),
-// which is exactly what isolating the first check from the second needs:
-// whenever KeptSeries >= RawSeries, the saving is zero or negative, and
-// against any REAL config's positive minimum that already fails the second
-// check too. Only minSaved == 0 -- reachable here, never through Load --
-// tells the two checks apart in a test.
+// when it should be. It holds two checks that look redundant today and must
+// not be collapsed into one:
 //
-//   - KeptSeries >= RawSeries is the spec's "required(M) must be a strict
-//     subset of M's observed labels": collapsing to the kept labels still
-//     yields as many series as the metric has today, so those labels
-//     already identify every series and the rule would save nothing.
-//   - a positive but small saving is real but not worth asking a person to
-//     add a recording rule and rewrite every consumer by hand for; see
-//     aggregate.min_series_saved's own doc comment in internal/config.
+//   - KeptSeries >= RawSeries is a CORRECTNESS floor, the spec's own
+//     "required(M) must be a strict subset of M's observed labels":
+//     collapsing to the kept labels still yields as many series as the
+//     metric has today, so those labels already identify every series and
+//     the rule would save nothing at all. This can never be configured
+//     away -- there is no threshold at which "saves nothing" becomes worth
+//     naming.
+//   - a saving below minSaved is a PREFERENCE: real, but not worth asking a
+//     person to add a recording rule and rewrite every consumer by hand
+//     for. See aggregate.min_series_saved's own doc comment in
+//     internal/config. Unlike the floor above, an operator can reasonably
+//     want this at zero one day -- name every real saving, however small.
+//
+// The two happen to overlap completely under any config config.Load can
+// produce TODAY, because Load treats min_series_saved: 0 as "unset" and
+// replaces it with a positive default (100): whenever KeptSeries >=
+// RawSeries the saving is zero or negative, which already fails a positive
+// minSaved on its own. That overlap is an artifact of Load's current
+// default, not a reason to merge the checks -- the day min_series_saved can
+// genuinely be zero, only the first check still catches "saves nothing".
+// minSaved is passed as a plain int rather than read from cfg for exactly
+// this reason: it lets a test pin minSaved at 0, a value Load itself can
+// never produce, and observe the first check on its own.
 func withholdReason(p aggregate.Proposal, minSaved int) string {
 	if p.KeptSeries >= p.RawSeries {
 		return fmt.Sprintf("collapsing to (%s) still measures %d series, as many as the %d it has today -- nothing would be saved",
