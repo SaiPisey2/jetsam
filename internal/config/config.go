@@ -39,6 +39,16 @@ type Config struct {
 	Pricing        struct {
 		PerSeriesMonth float64 `yaml:"per_series_month"`
 	} `yaml:"pricing"`
+	Aggregate struct {
+		// MinSeriesSaved is the least a collapse must save, measured
+		// against the real series count, before `jetsam aggregate` names
+		// it. A metric whose kept labels still cost nearly as many series
+		// as it does today is a real but not worthwhile collapse: someone
+		// still has to add the recording rule and rewrite every consumer
+		// by hand, and this is the number that says whether that is worth
+		// asking for.
+		MinSeriesSaved int `yaml:"min_series_saved"`
+	} `yaml:"aggregate"`
 }
 
 const defaultYAML = `prometheus:
@@ -81,6 +91,13 @@ prometheus_file: ""
 # Cloud, self-hosted Mimir, or VictoriaMetrics.
 pricing:
   per_series_month: 0
+
+# Used by "jetsam aggregate", which reports metrics whose consumers only
+# ever read a few of their labels -- never applied, see the command's own
+# output for why.
+aggregate:
+  # Do not name a metric that would save fewer series than this.
+  min_series_saved: 100
 `
 
 // WriteDefault writes the commented default config, refusing to overwrite
@@ -129,6 +146,16 @@ func Load(path string) (Config, error) {
 	}
 	if c.QueryLog.MinWindow == 0 {
 		c.QueryLog.MinWindow = 720 * time.Hour
+	}
+	// Same discipline as MinWindow above: only zero means "unset". A
+	// negative min_series_saved would make every collapse, however small,
+	// look worth naming -- a typo licensing noise rather than the config's
+	// stated purpose of filtering it out.
+	if c.Aggregate.MinSeriesSaved < 0 {
+		return Config{}, fmt.Errorf("aggregate.min_series_saved must not be negative, got %d", c.Aggregate.MinSeriesSaved)
+	}
+	if c.Aggregate.MinSeriesSaved == 0 {
+		c.Aggregate.MinSeriesSaved = 100
 	}
 	return c, nil
 }

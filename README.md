@@ -81,6 +81,31 @@ The token is read from the environment only -- never accept it as a flag,
 since a flag value lands in `ps` output and shell history. `-apply` without
 `-owner`, `-repo`, or a token is refused before anything else runs.
 
+## Aggregate
+
+`propose` only ever drops a metric nothing reads. `jetsam aggregate` looks
+at metrics something DOES read, but only through a few of their labels, and
+reports which ones could be collapsed into a recording rule instead --
+naming the rule, and the rewrite each consumer would need:
+
+```
+jetsam aggregate
+```
+
+It is a report, not an edit: no `-apply`, no rule file, no pull request.
+Nothing it prints is written anywhere, and it says so on every run --
+collapsing a metric for real means aggregating it upstream of Prometheus
+(a collector, or stream aggregation), never dropping it at the scrape
+config the way `propose` does. A recording rule cannot read a metric that
+has already been dropped at ingest.
+
+A metric only earns a name here when jetsam has actually measured the
+saving against your Prometheus, every consumer of it is a rule agreeing on
+the same operator and labels, and the saving clears
+`aggregate.min_series_saved` (100 by default). Anything else is refused,
+with the reason -- read by a dashboard or a logged query jetsam cannot
+rewrite, consumers that disagree, or a metric no rule aggregates at all.
+
 ## Limits
 
 - **Rules, dashboards and the query log are still not everything.** jetsam
@@ -143,6 +168,13 @@ since a flag value lands in `ps` output and shell history. `-apply` without
   1374-metric instance, resolving every candidate returned by
   `-include-unreferenced` takes about 26 seconds -- this runs concurrently,
   not one query at a time.
+- **`aggregate` refuses a metric your own query log merely re-logged.**
+  Prometheus' query log records every rule evaluation, not only ad-hoc
+  reads, so a metric a rule already aggregates cleanly can still show up
+  there under the rule's own text. jetsam cannot tell that apart from a
+  genuine ad-hoc query with the same text, and refuses on either -- so a
+  qualifying query log can withhold more from `aggregate` than it does
+  from `propose`.
 
 ## License
 

@@ -96,3 +96,49 @@ func TestNegativeMinWindowIsRefused(t *testing.T) {
 		t.Errorf("error %q does not name the offending field", err)
 	}
 }
+
+// TestAggregateMinSeriesSavedDefaults pins the same "every field has a
+// default that works" rule the rest of this file already holds Load to:
+// an install that never mentions aggregate.min_series_saved at all must
+// still get the 100 the default config comments.
+func TestAggregateMinSeriesSavedDefaults(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "jetsam.yaml")
+	os.WriteFile(p, []byte("prometheus:\n  url: http://x:9090\n"), 0o600)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Aggregate.MinSeriesSaved != 100 {
+		t.Errorf("Aggregate.MinSeriesSaved = %d, want 100", c.Aggregate.MinSeriesSaved)
+	}
+}
+
+// TestAggregateMinSeriesSavedHonorsAnExplicitValue: a configured value must
+// survive Load unchanged, not be silently forced back to the default.
+func TestAggregateMinSeriesSavedHonorsAnExplicitValue(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "jetsam.yaml")
+	os.WriteFile(p, []byte("prometheus:\n  url: http://x:9090\naggregate:\n  min_series_saved: 5\n"), 0o600)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Aggregate.MinSeriesSaved != 5 {
+		t.Errorf("Aggregate.MinSeriesSaved = %d, want 5", c.Aggregate.MinSeriesSaved)
+	}
+}
+
+// TestAggregateMinSeriesSavedNegativeIsRefused mirrors
+// TestNegativeMinWindowIsRefused: a negative threshold would make every
+// collapse look worth naming, however little it saves, which is the
+// opposite of what this field is for.
+func TestAggregateMinSeriesSavedNegativeIsRefused(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "jetsam.yaml")
+	os.WriteFile(p, []byte("prometheus:\n  url: http://x:9090\naggregate:\n  min_series_saved: -1\n"), 0o600)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("Load accepted a negative aggregate.min_series_saved, want an error")
+	}
+	if !strings.Contains(err.Error(), "min_series_saved") {
+		t.Errorf("error %q does not name the offending field", err)
+	}
+}

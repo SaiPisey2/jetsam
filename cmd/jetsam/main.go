@@ -4,14 +4,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/SaiPisey2/jetsam/internal/aggregate"
 	"github.com/SaiPisey2/jetsam/internal/config"
 	"github.com/SaiPisey2/jetsam/internal/corpus"
 	"github.com/SaiPisey2/jetsam/internal/emit"
@@ -160,10 +165,11 @@ func resolveJobs(ctx context.Context, cl *promapi.Client, metrics []string) ([][
 const usage = `jetsam finds Prometheus metrics nothing reads.
 
 usage:
-  jetsam init     [-config jetsam.yaml]
-  jetsam scan     [-config jetsam.yaml]
-  jetsam propose  [-include-unreferenced] [-config jetsam.yaml]
-  jetsam propose  -apply -owner OWNER -repo REPO [-base main] [-include-unreferenced] [-config jetsam.yaml]
+  jetsam init      [-config jetsam.yaml]
+  jetsam scan      [-config jetsam.yaml]
+  jetsam propose   [-include-unreferenced] [-config jetsam.yaml]
+  jetsam propose   -apply -owner OWNER -repo REPO [-base main] [-include-unreferenced] [-config jetsam.yaml]
+  jetsam aggregate [-config jetsam.yaml]
 
   -apply requires $GITHUB_TOKEN in the environment. It is never accepted as
   a flag: a flag value lands in argv, readable by every other user on the
@@ -172,6 +178,11 @@ usage:
   -include-unreferenced proposes dropping metrics no rule references even
   though jetsam has no query log confirming nobody reads them. Without it
   (the default), an install with no query log configured proposes nothing.
+
+  aggregate reports metrics whose consumers only ever read a few of their
+  labels, and prints the recording rule and consumer rewrites that would
+  collapse them. It never writes anything -- no -apply, no rule file, no
+  pull request -- see its own output for why.
 `
 
 func main() {
@@ -186,6 +197,8 @@ func main() {
 		runScan(os.Args[2:])
 	case "propose":
 		runPropose(os.Args[2:])
+	case "aggregate":
+		runAggregate(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)
@@ -668,6 +681,340 @@ func applyAndReport(ctx context.Context, stdout, stderr io.Writer, p forge.Provi
 		fmt.Fprintf(stdout, "%s: %s\n", pr.State, pr.URL)
 	}
 	return 0
+}
+
+// runAggregate is the production entry point for `jetsam aggregate`. Real
+// stdio and the real environment, the same seam runPropose uses -- and
+// nothing else: aggregate opens no pull request, so it needs no
+// forge.Provider and no credential of any kind.
+func runAggregate(args []string) {
+	os.Exit(aggregateCmd(args, os.Stdout, os.Stderr, os.Getenv))
+}
+
+// aggregateCmd implements `jetsam aggregate`: a report, not an edit. It
+// builds the inventory and corpus through exactly gather() and corpus.Build
+// -- the same path proposeCmd uses -- because a second, divergent way of
+// answering "what does the corpus say" would mean the two subcommands could
+// disagree about the same install, and only one of them could be right.
+//
+// From there it is arithmetic and rendering, never a write: it measures
+// each of aggregate.Decide's proposals against the real series count,
+// withholds whatever that measurement rules out, fills in the consumers and
+// the rendered rule and rewrites, and prints report.Aggregate -- which
+// states, on every call, that none of this has been applied. See that
+// package's own doc comment for why: a recording rule cannot read a metric
+// dropped at ingest, so the rule and rewrite this prints are only safe to
+// apply by hand alongside a drop that never happens.
+func aggregateCmd(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
+	fs := flag.NewFlagSet("aggregate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	path := fs.String("config", "jetsam.yaml", "config file")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	logErr := func(err error) { fmt.Fprintf(stderr, "error: %v\n", err) }
+
+	cfg, err := config.Load(*path)
+	if err != nil {
+		logErr(err)
+		return 1
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Prometheus.Timeout)
+	defer cancel()
+
+	cl := promapi.New(cfg.Prometheus.URL, cfg.Prometheus.Timeout)
+	status, err := cl.TSDBStatus(ctx, cfg.Prometheus.MetricLimit)
+	if err != nil {
+		logErr(err)
+		return 1
+	}
+
+	inv := inventory.Build(status)
+	names := make([]string, 0, len(inv.Metrics))
+	for _, m := range inv.Metrics {
+		names = append(names, m.Name)
+	}
+
+	src, err := gather(ctx, cfg, cl, getenv, names)
+	if err != nil {
+		logErr(err)
+		return 1
+	}
+	cor := corpus.Build(src, names)
+
+	proposals, refusals := aggregate.Decide(inv, cor, dashboardConsumers(src.Dashboards, names))
+
+	// Measuring against the real Prometheus is its own budget, separate
+	// from cfg.Prometheus.Timeout above: by this point that deadline has
+	// already paid for TSDBStatus, AlertingAndRecordingRules and whatever
+	// gather() spent on Grafana or the query log. One instant query per
+	// proposal is cheap next to resolveJobs' per-candidate cost in
+	// propose, but a large corpus can still hold dozens of proposals, and
+	// a fresh deadline sized for that is more honest than drawing down
+	// whatever happens to remain.
+	measureCtx, measureCancel := context.WithTimeout(context.Background(), cfg.Prometheus.Timeout)
+	defer measureCancel()
+	hc := &http.Client{Timeout: cfg.Prometheus.Timeout}
+
+	var findings []report.AggregateFinding
+	var withheld []string
+	for _, p := range proposals {
+		kept, err := measureKeptSeries(measureCtx, cfg.Prometheus.URL, hc, p.Metric, p.Keep)
+		if err != nil {
+			// A proposal whose measurement query fails is withheld, not
+			// reported with a missing or zero number: see the brief this
+			// command implements. Said on stderr, the same way gather()
+			// reports a degraded source, rather than silently dropped.
+			withheld = append(withheld, fmt.Sprintf("%s: could not measure the aggregated series count: %v", p.Metric, err))
+			continue
+		}
+		p.KeptSeries = kept
+
+		if reason := withholdReason(p, cfg.Aggregate.MinSeriesSaved); reason != "" {
+			withheld = append(withheld, fmt.Sprintf("%s: %s", p.Metric, reason))
+			continue
+		}
+
+		p.Consumers = rulesReading(p.Metric, src.Rules, names)
+
+		ruleYAML, err := emit.RenderRule("", p)
+		if err != nil {
+			// RenderRule refusing here means p disagrees with itself --
+			// Decide's own output should never do that -- so this is
+			// withheld exactly like an unmeasured proposal rather than
+			// printed with a rule that failed to render.
+			withheld = append(withheld, fmt.Sprintf("%s: could not render its recording rule: %v", p.Metric, err))
+			continue
+		}
+
+		consumers := make([]report.ConsumerFinding, 0, len(p.Consumers))
+		for _, c := range p.Consumers {
+			consumers = append(consumers, buildConsumerFinding(c, p))
+		}
+
+		findings = append(findings, report.AggregateFinding{Proposal: p, Rule: ruleYAML, Consumers: consumers})
+	}
+
+	if len(withheld) > 0 {
+		fmt.Fprintf(stderr, "warning: %d proposal(s) withheld:\n", len(withheld))
+		for _, w := range withheld {
+			fmt.Fprintln(stderr, "  - "+safe.Text(w))
+		}
+	}
+
+	report.Aggregate(stdout, findings, refusals)
+	return 0
+}
+
+// withholdReason reports why a measured proposal must not be printed, or ""
+// when it should be. minSaved is cfg.Aggregate.MinSeriesSaved, passed as a
+// plain int rather than read from cfg so the two checks below can be pinned
+// independently against a value config.Load itself can never produce (Load
+// treats min_series_saved: 0 as "unset" and replaces it with the default),
+// which is exactly what isolating the first check from the second needs:
+// whenever KeptSeries >= RawSeries, the saving is zero or negative, and
+// against any REAL config's positive minimum that already fails the second
+// check too. Only minSaved == 0 -- reachable here, never through Load --
+// tells the two checks apart in a test.
+//
+//   - KeptSeries >= RawSeries is the spec's "required(M) must be a strict
+//     subset of M's observed labels": collapsing to the kept labels still
+//     yields as many series as the metric has today, so those labels
+//     already identify every series and the rule would save nothing.
+//   - a positive but small saving is real but not worth asking a person to
+//     add a recording rule and rewrite every consumer by hand for; see
+//     aggregate.min_series_saved's own doc comment in internal/config.
+func withholdReason(p aggregate.Proposal, minSaved int) string {
+	if p.KeptSeries >= p.RawSeries {
+		return fmt.Sprintf("collapsing to (%s) still measures %d series, as many as the %d it has today -- nothing would be saved",
+			strings.Join(p.Keep, ", "), p.KeptSeries, p.RawSeries)
+	}
+	if saved := p.RawSeries - p.KeptSeries; saved < minSaved {
+		return fmt.Sprintf("saves only %d series, below the configured minimum of %d", saved, minSaved)
+	}
+	return ""
+}
+
+// dashboardConsumers reports, for each metric, the title of every dashboard
+// that reads it -- the per-dashboard breakdown aggregate.Decide's
+// dashboardConsumers parameter needs to name a blocking dashboard, which
+// Corpus itself does not keep (see Corpus.Used/UsedBy, which only remember
+// THAT a dashboard read something, not which one). It is recomputed here
+// from the same dashboards gather() already fetched, using the same
+// Extract+Resolve corpus.Build uses internally to decide FromDashboard,
+// rather than only from panel queries: a template variable
+// (label_values(metric, ...)) is exactly as real a read as a panel, and a
+// dashboard's own Grafana loads it every time the dashboard opens.
+func dashboardConsumers(dashboards []grafana.Dashboard, allMetrics []string) map[string][]string {
+	out := map[string][]string{}
+	name := func(title string, queries []string) {
+		for _, q := range queries {
+			refs, err := corpus.Extract(corpus.Substitute(q))
+			if err != nil {
+				// Contained the same way corpus.Build itself contains it:
+				// an unparseable panel already sets the FromDashboard bit
+				// through Corpus.Build's own fallback, which Decide checks
+				// independently of this map (see decide.go's comment on
+				// why both are checked). This map only ever adds a NAME
+				// when one is actually known.
+				continue
+			}
+			for _, m := range refs.Resolve(allMetrics) {
+				if !containsString(out[m], title) {
+					out[m] = append(out[m], title)
+				}
+			}
+		}
+	}
+	for _, d := range dashboards {
+		name(d.Title, d.Queries)
+		name(d.Title, d.VariableQueries)
+	}
+	return out
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// rulesReading returns, as aggregate.Consumer values, every rule in rules
+// whose query touches metric -- what fills aggregate.Proposal.Consumers,
+// which Decide itself leaves nil because Corpus carries no rule list (see
+// Proposal's own doc comment). It uses the same corpus.Extract().Resolve()
+// pair corpus.Build folds every rule through, so a rule counted here is
+// exactly a rule corpus.Build would have counted as a FromRule reader of
+// metric -- and a rule that fails to parse is skipped, not guessed at: an
+// unparseable rule already withholds every proposal by way of c.Blocked
+// (checked in aggregate.Decide), so no proposal for metric can exist for
+// this loop to be wrong about in the first place.
+func rulesReading(metric string, rules []promapi.Rule, allMetrics []string) []aggregate.Consumer {
+	var out []aggregate.Consumer
+	for _, r := range rules {
+		refs, err := corpus.Extract(r.Query)
+		if err != nil {
+			continue
+		}
+		for _, m := range refs.Resolve(allMetrics) {
+			if m == metric {
+				out = append(out, aggregate.Consumer{Kind: "rule", Group: r.Group, Name: r.Name, Query: r.Query})
+				break
+			}
+		}
+	}
+	return out
+}
+
+// buildConsumerFinding calls emit.RewriteConsumer for one consumer of p's
+// metric and turns its answer into a report.ConsumerFinding.
+//
+// RewriteConsumer's own contract allows a rewrite and a decline together:
+// one aggregate in c.Query can match p and get replaced while a second,
+// different aggregate over the same metric elsewhere in the same
+// expression does not and is left reading the raw series (see
+// RewriteConsumer's doc comment, and report.ConsumerFinding's). Both return
+// values are carried straight through unconditionally for exactly that
+// reason -- collapsing them into "rewritten, so ignore Declined" would
+// state something false about a consumer that still partly reads the raw
+// metric.
+func buildConsumerFinding(c aggregate.Consumer, p aggregate.Proposal) report.ConsumerFinding {
+	rewritten, declined, err := emit.RewriteConsumer(c.Query, p)
+	if err != nil {
+		// RewriteConsumer only errors when p itself is not internally
+		// consistent, or when the rewrite it produced fails to re-parse --
+		// both a defect in jetsam's own pipeline, never a fact this
+		// specific consumer's query stated. Reported as not rewritable,
+		// with the query left unchanged, rather than silently dropped: see
+		// report.ConsumerFinding's doc comment on why no consumer is ever
+		// left out of this list.
+		return report.ConsumerFinding{Consumer: c, Rewritten: c.Query, Declined: err.Error()}
+	}
+	return report.ConsumerFinding{Consumer: c, Rewritten: rewritten, Declined: declined}
+}
+
+// aggregateQueryMaxBytes bounds the instant-query response
+// measureKeptSeries reads, mirroring promapi's own maxResponseBytes: a
+// malformed or hostile response must produce a clear error, never a
+// silently truncated decode that reads as "this aggregate has fewer series
+// than it actually does".
+const aggregateQueryMaxBytes = 64 << 20
+
+// measureKeptSeries issues one instant query counting how many series
+// aggregating metric down to keep would produce:
+// count(count by (<keep>) ({__name__="<metric>"})). It cannot reuse
+// promapi.Client for this -- QueryJobsFor answers a different question and
+// its request-building is unexported -- so it mirrors that idiom directly:
+// the metric name is passed through %q, never concatenated bare, because a
+// metric name is untrusted input (Prometheus 3 permits UTF-8 names) and
+// this repo has already shipped one injection through exactly this kind of
+// interpolation. When keep is empty the clause is "by ()", which collapses
+// every series to one -- correct for a consumer that aggregates the metric
+// down to a single number.
+func measureKeptSeries(ctx context.Context, baseURL string, hc *http.Client, metric string, keep []string) (int, error) {
+	by := "()"
+	if len(keep) > 0 {
+		by = "(" + strings.Join(keep, ", ") + ")"
+	}
+	query := fmt.Sprintf("count(count by %s ({__name__=%q}))", by, metric)
+
+	u := strings.TrimRight(baseURL, "/") + "/api/v1/query?" + (url.Values{"query": {query}}).Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, fmt.Errorf("build measurement query for %s: %w", metric, err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("measure %s: %w", metric, err)
+	}
+	defer resp.Body.Close()
+
+	lr := &io.LimitedReader{R: resp.Body, N: aggregateQueryMaxBytes + 1}
+	body, err := io.ReadAll(lr)
+	if err != nil {
+		return 0, fmt.Errorf("read measurement response for %s: %w", metric, err)
+	}
+	if lr.N == 0 {
+		return 0, fmt.Errorf("measurement response for %s exceeds %d byte limit", metric, aggregateQueryMaxBytes)
+	}
+
+	var env struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Value [2]json.RawMessage `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+		ErrorType string `json:"errorType"`
+		Error     string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return 0, fmt.Errorf("decode measurement response for %s: %w", metric, err)
+	}
+	if env.Status != "success" {
+		return 0, fmt.Errorf("measure %s: %s: %s", metric, env.ErrorType, env.Error)
+	}
+	if len(env.Data.Result) != 1 {
+		return 0, fmt.Errorf("measure %s: instant query returned %d result(s), want exactly 1", metric, len(env.Data.Result))
+	}
+	// Prometheus's instant-query API encodes a sample's value as
+	// [timestamp, "value string"] -- the value itself is a JSON string, not
+	// a bare number, so it is decoded as one and parsed rather than
+	// unmarshalled directly into a float64.
+	var s string
+	if err := json.Unmarshal(env.Data.Result[0].Value[1], &s); err != nil {
+		return 0, fmt.Errorf("decode measurement value for %s: %w", metric, err)
+	}
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse measurement value %q for %s: %w", s, metric, err)
+	}
+	return int(n), nil
 }
 
 // diffContext is how many unchanged lines surround a change in the
