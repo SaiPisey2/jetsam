@@ -138,6 +138,9 @@ Limits.
   dropping it. Configuring `grafana.url` is what covers that case, because
   jetsam then reads those variable queries from the dashboards themselves;
   `jetsam scan` warns when the log is configured and Grafana is not.
+  `jetsam aggregate` run without `grafana.url` means dashboards were not
+  checked at all -- it still proposes, but with a caveat saying so, rather
+  than refusing outright.
 - **jetsam sees the dashboards its token can see.** Grafana's search API
   is paginated and jetsam pages through all of it, but a service-account
   token without permission on every folder returns a subset, with no

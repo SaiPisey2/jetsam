@@ -76,19 +76,25 @@ func gather(ctx context.Context, cfg config.Config, cl *promapi.Client, getenv f
 			}
 		}
 
-		// The one configuration where the query log's blind spot bites.
-		// Prometheus' global.query_log_file records PromQL engine
-		// evaluations only: a metric read through /api/v1/label/*/values
-		// or /api/v1/series -- which is how Grafana resolves a dashboard's
-		// template variables, and what Explore's metric browser uses --
-		// never appears in it. With a qualifying log and no Grafana, such
-		// a metric is absent from the corpus, grades unqueried, and plain
-		// "jetsam propose" with no flag proposes deleting it.
+		// The one configuration where the query log's blind spot bites,
+		// for every subcommand that reads a corpus, not only propose's own
+		// grading: Prometheus' global.query_log_file records PromQL
+		// engine evaluations only, a metric read through
+		// /api/v1/label/*/values or /api/v1/series -- which is how
+		// Grafana resolves a dashboard's template variables, and what
+		// Explore's metric browser uses -- never appears in it. With a
+		// qualifying log and no Grafana, such a metric is absent from the
+		// corpus entirely: scan grades it as if nothing read it, propose
+		// may offer to drop it, and aggregate may propose collapsing it --
+		// aggregate at least caveats every proposal while grafana.url is
+		// unset (see aggregate.Decide), but that caveat says only that no
+		// dashboard was consulted, not that this specific blind spot is
+		// why.
 		if cfg.Grafana.URL == "" {
 			fmt.Fprintln(os.Stderr, "warning: query_log.path is set and grafana.url is not. Prometheus' query log "+
 				"records PromQL queries only, so a metric read only through label-values or series lookups -- "+
-				"how Grafana resolves dashboard variables -- is invisible to it and can grade unqueried. "+
-				"Set grafana.url to cover that case.")
+				"how Grafana resolves dashboard variables -- is invisible to jetsam entirely, and every "+
+				"subcommand treats that silence as nobody reading it. Set grafana.url to cover that case.")
 		}
 	}
 	return src, nil
@@ -788,8 +794,6 @@ func aggregateCmd(args []string, stdout, stderr io.Writer, getenv func(string) s
 			continue
 		}
 
-		p.Consumers = rulesReading(p.Metric, src.Rules, names)
-
 		ruleYAML, err := emit.RenderRule("", p)
 		if err != nil {
 			// RenderRule refusing here means p disagrees with itself --
@@ -800,8 +804,9 @@ func aggregateCmd(args []string, stdout, stderr io.Writer, getenv func(string) s
 			continue
 		}
 
-		consumers := make([]report.ConsumerFinding, 0, len(p.Consumers))
-		for _, c := range p.Consumers {
+		reading := rulesReading(p.Metric, src.Rules, names)
+		consumers := make([]report.ConsumerFinding, 0, len(reading))
+		for _, c := range reading {
 			consumers = append(consumers, buildConsumerFinding(c, p))
 		}
 
@@ -913,9 +918,9 @@ func alreadyRecordedBy(ruleName string, rules []promapi.Rule) (promapi.Rule, boo
 }
 
 // rulesReading returns, as aggregate.Consumer values, every rule in rules
-// whose query touches metric -- what fills aggregate.Proposal.Consumers,
-// which Decide itself leaves nil because Corpus carries no rule list (see
-// Proposal's own doc comment). It uses the same corpus.Extract().Resolve()
+// whose query touches metric -- built here, from the rules themselves,
+// because Decide has no rule list to work from, only the corpus's
+// summarised Needs. It uses the same corpus.Extract().Resolve()
 // pair corpus.Build folds every rule through, so a rule counted here is
 // exactly a rule corpus.Build would have counted as a FromRule reader of
 // metric -- and a rule that fails to parse is skipped, not guessed at: an
@@ -954,13 +959,15 @@ func rulesReading(metric string, rules []promapi.Rule, allMetrics []string) []ag
 func buildConsumerFinding(c aggregate.Consumer, p aggregate.Proposal) report.ConsumerFinding {
 	rewritten, declined, err := emit.RewriteConsumer(c.Query, p)
 	if err != nil {
-		// RewriteConsumer only errors when p itself is not internally
-		// consistent, or when the rewrite it produced fails to re-parse --
-		// both a defect in jetsam's own pipeline, never a fact this
-		// specific consumer's query stated. Reported as not rewritable,
-		// with the query left unchanged, rather than silently dropped: see
-		// report.ConsumerFinding's doc comment on why no consumer is ever
-		// left out of this list.
+		// RewriteConsumer errors when p itself is not internally
+		// consistent or the rewrite it produced fails to re-parse -- both
+		// a defect in jetsam's own pipeline -- but also when c.Query
+		// itself fails to parse, or when p.Window does not parse as a
+		// PromQL range: the first is a fact about this specific consumer's
+		// own query text, not jetsam's pipeline. Either way it is reported
+		// as not rewritable, with the query left unchanged, rather than
+		// silently dropped: see report.ConsumerFinding's doc comment on
+		// why no consumer is ever left out of this list.
 		return report.ConsumerFinding{Consumer: c, Rewritten: c.Query, Declined: err.Error()}
 	}
 	return report.ConsumerFinding{Consumer: c, Rewritten: rewritten, Declined: declined}

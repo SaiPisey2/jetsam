@@ -158,12 +158,13 @@ func RenderRule(ruleYAML string, p aggregate.Proposal) (string, error) {
 // groupRules returns the rules sequence RenderRule appends its new rule to,
 // creating whatever is missing to get there.
 //
-// The FIRST existing group is used rather than always inventing a new one:
-// the aggregate command gives an operator a single configured rule file
-// specifically so every rule jetsam adds lands together, and starting a
-// second group on every run would defeat that the moment the file already
-// holds one. "jetsam" only names a group this function itself has to
-// invent, for a file that started with none at all.
+// The FIRST existing group is used rather than always inventing a new one,
+// so every rule jetsam adds lands together instead of starting a fresh
+// group on every call -- purely presentational, since aggregateCmd always
+// calls RenderRule with an empty ruleYAML (it writes nothing to disk; see
+// aggregateCmd's own doc comment) and there is no config naming a rule
+// file for this to land in. "jetsam" only names a group this function
+// itself has to invent, for a file that started with none at all.
 func groupRules(groups *yaml.Node) *yaml.Node {
 	var group *yaml.Node
 	if len(groups.Content) > 0 {

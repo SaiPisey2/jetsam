@@ -1,5 +1,5 @@
 // Package aggregate decides which metrics can be recorded in a smaller,
-// pre-aggregated form and have their raw series dropped.
+// pre-aggregated form.
 //
 // The claim here is much stronger than a drop's. A drop says "nothing reads
 // this". An aggregation says "every consumer of this needs only these
@@ -43,12 +43,6 @@ type Proposal struct {
 	// the pipeline.
 	KeptSeries int
 	RuleName   string
-	// Consumers is left empty here: this package has no rule list to
-	// populate it from, only the corpus's summarised Needs. A later step
-	// fills it in from the rules themselves when it builds the request
-	// that asks a human to approve the collapse, the same way it fills in
-	// KeptSeries from a count query.
-	Consumers []Consumer
 	// Caveats names something Decide judged safe to propose anyway, but
 	// that the person approving it should see before acting on the
 	// numbers. Two sources are about evidence that was simply never
@@ -74,8 +68,8 @@ type Proposal struct {
 	Caveats []string
 }
 
-// Consumer names one thing that reads a proposed metric, for the pull
-// request body that asks a human to approve the collapse.
+// Consumer names one thing that reads a proposed metric, for the report
+// that shows a person what rewriting it would look like.
 type Consumer struct {
 	Kind  string // "rule"
 	Group string
