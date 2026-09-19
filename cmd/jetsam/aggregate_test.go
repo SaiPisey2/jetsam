@@ -398,7 +398,12 @@ func TestAggregateRunTwiceAgainstTheSameLogProducesTheSameResult(t *testing.T) {
 	if strings.Contains(second.String(), "disagree") {
 		t.Errorf("second run treats jetsam's own logged measurement query as a disagreeing consumer:\n%s", second.String())
 	}
-	if strings.Contains(second.String(), "CAVEAT") {
+	// grafana.url is unset in both configs, so both runs carry the
+	// evidence-never-consulted caveat regardless of the query log -- that
+	// is not the defect this test guards against. What must NOT appear,
+	// specifically, is a caveat naming jetsam's own logged measurement
+	// query as if it were a real ad-hoc read.
+	if strings.Contains(second.String(), "read by a query in the query log") {
 		t.Errorf("second run adds a caveat for jetsam's own query, which is tooling, not real usage:\n%s", second.String())
 	}
 }
@@ -432,8 +437,8 @@ func TestDashboardConsumersDeduplicatesByTitle(t *testing.T) {
 }
 
 // TestRulesReadingFindsEveryRuleTouchingTheMetric is a direct unit test of
-// the helper that fills aggregate.Proposal.Consumers, which decide.go
-// explicitly leaves nil because Corpus carries no rule list.
+// the helper that builds each proposal's consumer list, which Decide itself
+// has no rule list to build because Corpus carries none.
 func TestRulesReadingFindsEveryRuleTouchingTheMetric(t *testing.T) {
 	rules := []promapi.Rule{
 		{Group: "g", Name: "r1", Query: "sum by (path) (http_requests_total)", Type: "recording"},

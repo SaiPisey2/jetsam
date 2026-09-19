@@ -17,7 +17,7 @@ import (
 // bill of health.
 func TestAggregateAlwaysSaysNothingIsApplied(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, nil, nil, nil)
+	Aggregate(&b, "rules", nil, nil, nil)
 	out := b.String()
 	if !strings.Contains(out, "Nothing here is applied") {
 		t.Fatalf("report does not say nothing is applied when there is nothing to report:\n%s", out)
@@ -30,13 +30,46 @@ func TestAggregateAlwaysSaysNothingIsApplied(t *testing.T) {
 	}
 }
 
+// TestAggregateNamesTheSourcesItRead is Important 1's second half: this
+// command makes the strongest claim in the project -- "every consumer of
+// this needs only these labels" -- and a reader cannot judge it without
+// knowing which evidence sources actually contributed. The sentence sits
+// right next to the not-applied notice, on every call, the same way that
+// notice does.
+func TestAggregateNamesTheSourcesItRead(t *testing.T) {
+	var b bytes.Buffer
+	Aggregate(&b, "rules, dashboards and the query log", nil, nil, nil)
+	out := b.String()
+	if !strings.Contains(out, "rules, dashboards and the query log") {
+		t.Fatalf("report does not name which sources were read:\n%s", out)
+	}
+	notice := strings.Index(out, "Nothing here is applied")
+	sources := strings.Index(out, "rules, dashboards and the query log")
+	if notice < 0 || sources < 0 || sources < notice {
+		t.Errorf("the sources line does not appear alongside the not-applied notice:\n%s", out)
+	}
+}
+
+// TestAggregateSanitizesTheSourcesLine: sources is built from corpus
+// state today, not remote input, but Aggregate is exported and every other
+// field this function prints already goes through safe.Text -- a caller
+// two packages away should not have to know this one is an exception.
+func TestAggregateSanitizesTheSourcesLine(t *testing.T) {
+	const hostile = "rules\x1b[2KFAKE"
+	var b bytes.Buffer
+	Aggregate(&b, hostile, nil, nil, nil)
+	if strings.ContainsRune(b.String(), 0x1b) {
+		t.Errorf("report contains a raw ESC byte:\n%q", b.String())
+	}
+}
+
 // TestAggregateSaysNothingIsAppliedWhenEveryMetricIsRefused pins the exact
 // failure mode the brief names: a run where every metric was refused must
 // carry the same warning as one with findings, not silently drop it because
 // there was "nothing" to report alongside it.
 func TestAggregateSaysNothingIsAppliedWhenEveryMetricIsRefused(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, nil, nil, []aggregate.Refusal{{Metric: "m_total", Reason: "some consumer needs every label"}})
+	Aggregate(&b, "rules", nil, nil, []aggregate.Refusal{{Metric: "m_total", Reason: "some consumer needs every label"}})
 	out := b.String()
 	if !strings.Contains(out, "Nothing here is applied") {
 		t.Fatalf("report drops the not-applied notice when every metric was refused:\n%s", out)
@@ -48,7 +81,7 @@ func TestAggregateSaysNothingIsAppliedWhenEveryMetricIsRefused(t *testing.T) {
 // there next to the metric it names.
 func TestAggregateListsRefusalsWithReasons(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, nil, nil, []aggregate.Refusal{
+	Aggregate(&b, "rules", nil, nil, []aggregate.Refusal{
 		{Metric: "http_requests_total", Reason: "read by a dashboard jetsam cannot rewrite"},
 	})
 	out := b.String()
@@ -87,7 +120,7 @@ func sampleFinding() AggregateFinding {
 // kept, the operator, and the rendered recording rule.
 func TestAggregateStatesTheSeriesCountsLabelsAndOperator(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil, nil)
+	Aggregate(&b, "rules", []AggregateFinding{sampleFinding()}, nil, nil)
 	out := b.String()
 
 	for _, want := range []string{"http_requests_total", "400", "12", "path", "sum", "path:http_requests_total:sum"} {
@@ -108,7 +141,7 @@ func TestAggregateShowsACaveatProminently(t *testing.T) {
 	f.Proposal.Caveats = []string{"queried ad hoc within the query log's window: jetsam cannot rewrite a query it only saw in a log"}
 
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{f}, nil, nil)
+	Aggregate(&b, "rules", []AggregateFinding{f}, nil, nil)
 	out := b.String()
 
 	if !strings.Contains(out, "query log's window") {
@@ -127,7 +160,7 @@ func TestAggregateShowsACaveatProminently(t *testing.T) {
 // not gain a spurious one.
 func TestAggregateWithoutACaveatPrintsNone(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil, nil)
+	Aggregate(&b, "rules", []AggregateFinding{sampleFinding()}, nil, nil)
 	if strings.Contains(b.String(), "CAVEAT") {
 		t.Errorf("report shows a caveat for a proposal that carries none:\n%s", b.String())
 	}
@@ -137,7 +170,7 @@ func TestAggregateWithoutACaveatPrintsNone(t *testing.T) {
 // kept labels alone that everything else about the metric is gone.
 func TestAggregateNamesWhatIsRemoved(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil, nil)
+	Aggregate(&b, "rules", []AggregateFinding{sampleFinding()}, nil, nil)
 	out := b.String()
 	if !strings.Contains(out, "drop") {
 		t.Errorf("report does not say which labels are removed:\n%s", out)
@@ -147,7 +180,7 @@ func TestAggregateNamesWhatIsRemoved(t *testing.T) {
 // TestAggregateShowsARewrittenConsumerBeforeAndAfter.
 func TestAggregateShowsARewrittenConsumerBeforeAndAfter(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil, nil)
+	Aggregate(&b, "rules", []AggregateFinding{sampleFinding()}, nil, nil)
 	out := b.String()
 	if !strings.Contains(out, "sum by (path) (http_requests_total) > 100") {
 		t.Errorf("report does not show the consumer's original query:\n%s", out)
@@ -164,7 +197,7 @@ func TestAggregateShowsARewrittenConsumerBeforeAndAfter(t *testing.T) {
 // aggregation is safe when it is not.
 func TestAggregateReportsADeclinedConsumerRatherThanOmittingIt(t *testing.T) {
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{sampleFinding()}, nil, nil)
+	Aggregate(&b, "rules", []AggregateFinding{sampleFinding()}, nil, nil)
 	out := b.String()
 	if !strings.Contains(out, "r2") {
 		t.Fatalf("report omits the declined consumer entirely:\n%s", out)
@@ -203,7 +236,7 @@ func TestAggregatePartiallyRewrittenConsumerShowsBothTheRewriteAndTheDecline(t *
 		}},
 	}
 	var b bytes.Buffer
-	Aggregate(&b, []AggregateFinding{finding}, nil, nil)
+	Aggregate(&b, "rules", []AggregateFinding{finding}, nil, nil)
 	out := b.String()
 
 	if !strings.Contains(out, "path:m_total:sum_rate5m + min by (path) (rate(m_total[5m]))") {
@@ -223,7 +256,7 @@ func TestAggregatePartiallyRewrittenConsumerShowsBothTheRewriteAndTheDecline(t *
 func TestAggregateSanitizesRemoteSourcedText(t *testing.T) {
 	const hostile = "m\x1b[2KFAKE"
 	var b bytes.Buffer
-	Aggregate(&b, nil, nil, []aggregate.Refusal{{Metric: hostile, Reason: "some consumer needs every label"}})
+	Aggregate(&b, "rules", nil, nil, []aggregate.Refusal{{Metric: hostile, Reason: "some consumer needs every label"}})
 	out := b.String()
 	if strings.ContainsRune(out, 0x1b) {
 		t.Errorf("report contains a raw ESC byte:\n%q", out)

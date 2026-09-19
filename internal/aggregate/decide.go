@@ -51,13 +51,18 @@ type Proposal struct {
 	Consumers []Consumer
 	// Caveats names something Decide judged safe to propose anyway, but
 	// that the person approving it should see before acting on the
-	// numbers. Today the only source is corpus.FromLog: the query log
-	// selects on the httpRequest marker alone (see querylog's own
-	// comment on that choice), which cannot distinguish a genuine
-	// one-off read from a dashboard or API client re-running the same
-	// query on a schedule -- exactly the population an install with
-	// query_log.path set and grafana.url unset relies on the log to
-	// cover. What the log DOES prove is that the query's label
+	// numbers. Two sources are about evidence that was simply never
+	// gathered: grafana.url unset means no dashboard was ever consulted,
+	// and no query log configured means no ad-hoc read was ever visible --
+	// both look, in the corpus, identical to that source having been
+	// checked and having found nothing, so Decide states the gap here
+	// rather than let a reader assume it was ruled out. The third is
+	// corpus.FromLog: the query log selects on the httpRequest marker
+	// alone (see querylog's own comment on that choice), which cannot
+	// distinguish a genuine one-off read from a dashboard or API client
+	// re-running the same query on a schedule -- exactly the population an
+	// install with query_log.path set and grafana.url unset relies on the
+	// log to cover. What the log DOES prove is that the query's label
 	// requirements already entered need's union in corpus.Build, so the
 	// safety proof this package exists to make is untouched by it; what
 	// it does NOT prove is that nothing keeps re-running it. That
@@ -146,6 +151,24 @@ func Decide(inv inventory.Inventory, c corpus.Corpus, dashboardConsumers map[str
 		ruleName := RuleName(m.Name, keep, op, fn, win)
 
 		var caveats []string
+		// refuse's own evidence-completeness gate only catches Grafana or
+		// the query log being CONFIGURED but unreachable/unreadable -- a
+		// source never configured at all leaves the exact same corpus state
+		// (no FromDashboard bit, no dashboardConsumers entry, nothing in
+		// c.Used from that source) as one that was checked and found
+		// nothing, and refuse cannot tell the two apart because there is
+		// nothing to tell apart: both are silence. A hard refusal here would
+		// kill the one positive case an install with neither source
+		// configured has ever had, so this states the gap instead, right on
+		// the proposal it could invalidate, rather than saying nothing.
+		if !c.DashboardsConfigured {
+			caveats = append(caveats, "grafana.url is not set, so no dashboard was consulted: a dashboard genuinely "+
+				"reading this metric would be invisible to jetsam, and this proposal would not have been refused for it")
+		}
+		if !c.LogRead {
+			caveats = append(caveats, "no query log is configured, so an ad-hoc read of this metric is invisible: "+
+				"a query that reads it would not have been refused for it")
+		}
 		if c.UsedBy[m.Name]&corpus.FromLog != 0 {
 			// See Proposal.Caveats' own doc comment for why this is a
 			// caveat, not a refusal: its label requirements are already

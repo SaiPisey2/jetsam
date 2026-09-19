@@ -808,7 +808,7 @@ func aggregateCmd(args []string, stdout, stderr io.Writer, getenv func(string) s
 		findings = append(findings, report.AggregateFinding{Proposal: p, Rule: ruleYAML, Consumers: consumers})
 	}
 
-	report.Aggregate(stdout, findings, withheld, refusals)
+	report.Aggregate(stdout, cor.SourceList(), findings, withheld, refusals)
 	return 0
 }
 

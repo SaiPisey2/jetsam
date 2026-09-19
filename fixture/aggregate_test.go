@@ -256,7 +256,7 @@ func TestAggregateProposesLoadgenWithMeasuredNumbers(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	report.Aggregate(&buf, []report.AggregateFinding{{Proposal: p, Rule: ruleYAML, Consumers: consumers}}, nil, nil)
+	report.Aggregate(&buf, cor.SourceList(), []report.AggregateFinding{{Proposal: p, Rule: ruleYAML, Consumers: consumers}}, nil, nil)
 	out := buf.String()
 
 	wantLine := fmt.Sprintf("%s: %d series -> %d kept (saves %d)", loadgenMetric, raw, kept, raw-kept)
@@ -403,7 +403,7 @@ func TestAggregateReportAppliesNothingEvenWhenEveryMetricIsRefused(t *testing.T)
 	}
 
 	var buf bytes.Buffer
-	report.Aggregate(&buf, nil, nil, refusals)
+	report.Aggregate(&buf, cor.SourceList(), nil, nil, refusals)
 	if !strings.Contains(buf.String(), "Nothing here is applied") {
 		t.Errorf("report drops the not-applied notice when every metric was refused:\n%s", buf.String())
 	}

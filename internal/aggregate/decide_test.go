@@ -166,9 +166,12 @@ func TestRuleNameSortsItsLabels(t *testing.T) {
 // will not return what it did.
 func TestAMetricTheQueryLogReadIsProposedWithACaveat(t *testing.T) {
 	c := corpus.Corpus{
-		Used:   map[string]bool{"m_total": true},
-		UsedBy: map[string]corpus.Source{"m_total": corpus.FromRule | corpus.FromLog},
-		Needs:  map[string]corpus.MetricNeed{"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true}},
+		Used:                 map[string]bool{"m_total": true},
+		UsedBy:               map[string]corpus.Source{"m_total": corpus.FromRule | corpus.FromLog},
+		Needs:                map[string]corpus.MetricNeed{"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true}},
+		DashboardsConfigured: true,
+		DashboardsReachable:  true,
+		LogRead:              true,
 	}
 	props, refs := Decide(inv("m_total", 400), c, nil)
 	if len(refs) != 0 {
@@ -183,16 +186,88 @@ func TestAMetricTheQueryLogReadIsProposedWithACaveat(t *testing.T) {
 }
 
 // TestAMetricNeitherLoggedNorDashboardReadCarriesNoCaveat: the caveat must
-// not appear on a proposal nothing logged ever touched.
+// not appear on a proposal nothing logged ever touched -- with both
+// evidence sources actually configured and read, so the two new
+// evidence-never-consulted caveats (see the tests below) do not confound
+// this one.
 func TestAMetricNeitherLoggedNorDashboardReadCarriesNoCaveat(t *testing.T) {
 	c := corpus.Corpus{
-		Used:   map[string]bool{"m_total": true},
-		UsedBy: map[string]corpus.Source{"m_total": corpus.FromRule},
-		Needs:  map[string]corpus.MetricNeed{"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true}},
+		Used:                 map[string]bool{"m_total": true},
+		UsedBy:               map[string]corpus.Source{"m_total": corpus.FromRule},
+		Needs:                map[string]corpus.MetricNeed{"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true}},
+		DashboardsConfigured: true,
+		DashboardsReachable:  true,
+		LogRead:              true,
 	}
 	props, _ := Decide(inv("m_total", 400), c, nil)
 	if len(props) != 1 || len(props[0].Caveats) != 0 {
 		t.Fatalf("props = %+v, want one proposal with no caveats", props)
+	}
+}
+
+// TestAMetricIsCaveatedWhenGrafanaWasNeverConfigured is Important 1's first
+// half: grafana.url unset and a metric a dashboard genuinely reads look
+// IDENTICAL in the corpus -- neither carries a FromDashboard bit or a
+// dashboardConsumers entry -- so refuse's own gate, which only catches
+// Grafana configured-but-unreachable, cannot tell them apart. Decide must
+// not stay silent about that gap: it proposes the metric (a hard refusal
+// here would kill the only positive case an install with no dashboards
+// configured has ever had) but says so.
+func TestAMetricIsCaveatedWhenGrafanaWasNeverConfigured(t *testing.T) {
+	c := corpus.Corpus{
+		Used:    map[string]bool{"m_total": true},
+		UsedBy:  map[string]corpus.Source{"m_total": corpus.FromRule},
+		Needs:   map[string]corpus.MetricNeed{"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true}},
+		LogRead: true,
+		// DashboardsConfigured left false: grafana.url was never set.
+	}
+	props, refs := Decide(inv("m_total", 400), c, nil)
+	if len(refs) != 0 {
+		t.Fatalf("refusals = %v, want none -- an unconfigured source caveats, it does not refuse", refs)
+	}
+	if len(props) != 1 {
+		t.Fatalf("got %d proposals, want 1", len(props))
+	}
+	found := false
+	for _, cv := range props[0].Caveats {
+		if strings.Contains(cv, "grafana.url") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Caveats = %v, want one naming that grafana.url is not set", props[0].Caveats)
+	}
+}
+
+// TestAMetricIsCaveatedWhenNoQueryLogIsConfigured is Important 1's second
+// half, for the query log: no query_log.path configured leaves an ad-hoc
+// read of this metric exactly as invisible as it is when the log is
+// configured but exists to be checked -- LogRead is what says whether the
+// log ran at all, and the caveat fires whenever it did not.
+func TestAMetricIsCaveatedWhenNoQueryLogIsConfigured(t *testing.T) {
+	c := corpus.Corpus{
+		Used:                 map[string]bool{"m_total": true},
+		UsedBy:               map[string]corpus.Source{"m_total": corpus.FromRule},
+		Needs:                map[string]corpus.MetricNeed{"m_total": {Required: []string{"path"}, Ops: []string{"sum"}, AllOpsSafe: true}},
+		DashboardsConfigured: true,
+		DashboardsReachable:  true,
+		// LogRead left false: query_log.path was never set.
+	}
+	props, refs := Decide(inv("m_total", 400), c, nil)
+	if len(refs) != 0 {
+		t.Fatalf("refusals = %v, want none -- an unconfigured source caveats, it does not refuse", refs)
+	}
+	if len(props) != 1 {
+		t.Fatalf("got %d proposals, want 1", len(props))
+	}
+	found := false
+	for _, cv := range props[0].Caveats {
+		if strings.Contains(cv, "query log") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Caveats = %v, want one naming that no query log is configured", props[0].Caveats)
 	}
 }
 
@@ -247,7 +322,10 @@ func TestBothDashboardAndLogBitsRefuseForTheDashboardInTheSameRun(t *testing.T) 
 			"dash_and_log": corpus.FromRule | corpus.FromDashboard | corpus.FromLog,
 			"log_only":     corpus.FromRule | corpus.FromLog,
 		},
-		Needs: map[string]corpus.MetricNeed{"dash_and_log": need, "log_only": need},
+		Needs:                map[string]corpus.MetricNeed{"dash_and_log": need, "log_only": need},
+		DashboardsConfigured: true,
+		DashboardsReachable:  true,
+		LogRead:              true,
 	}
 
 	props, refs := Decide(inv2, c, nil)

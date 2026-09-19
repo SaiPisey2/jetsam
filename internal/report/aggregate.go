@@ -77,14 +77,23 @@ stream aggregation), never as a drop added to a scrape config.`
 // unconditionally, and writeFinding for why a caveat comes right after the
 // metric's own headline numbers rather than at the end.
 //
+// sources is the same sentence corpus.Corpus.SourceList() builds for the
+// drop path's "nothing reads it" claim, printed here for the same reason:
+// this command's own claim is stronger still -- "every consumer of this
+// needs only these labels" -- and a reader cannot judge it without knowing
+// which sources actually contributed evidence. Naming them once, next to
+// the notice that nothing is applied, is cheaper than making a reader
+// re-derive it from which caveats happen to be present on which proposal.
+//
 // withheld is printed even when findings has nothing in it: a run that
 // found several candidates and withheld every one of them (an
 // unmeasurable proposal, one already recorded by an existing rule, a
 // saving below the configured minimum) must not read, to something
 // piping only stdout, as indistinguishably clean as a run with no
 // candidates at all.
-func Aggregate(w io.Writer, findings []AggregateFinding, withheld []string, refusals []aggregate.Refusal) {
+func Aggregate(w io.Writer, sources string, findings []AggregateFinding, withheld []string, refusals []aggregate.Refusal) {
 	fmt.Fprintln(w, notAppliedNotice)
+	fmt.Fprintf(w, "Evidence sources read: %s.\n", safe.Text(sources))
 	fmt.Fprintln(w)
 
 	if len(findings) == 0 {
