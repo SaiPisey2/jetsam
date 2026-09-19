@@ -685,6 +685,12 @@ func TestFnsIsNeverEmptyForAnEntryInNeeds(t *testing.T) {
 // needs every label" that used to be all Decide's refusal sentence had to
 // work with -- which is false for these two, since a real requirement
 // (Required: [path]) was computed before the function/subquery forced All.
+//
+// The subquery case's reason is the same generic "something between it and
+// the aggregation" sentence rangeFn now gives for every unrecognised span,
+// not a subquery-specific one -- see rangeFn's own doc comment for why one
+// check now covers a subquery, a stray function and a bare comparison alike
+// rather than naming each shape separately.
 func TestBlockersNameTheActualCause(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -699,7 +705,7 @@ func TestBlockersNameTheActualCause(t *testing.T) {
 		{
 			name:  "a subquery",
 			query: `sum(rate(m_total[5m:1m]))`,
-			want:  "subquery",
+			want:  "does not commute with pre-aggregation",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

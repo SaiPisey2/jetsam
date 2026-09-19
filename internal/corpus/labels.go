@@ -286,62 +286,81 @@ func enclosingAggregate(path []parser.Node) (*parser.AggregateExpr, int) {
 	return nil, -1
 }
 
-// rangeFn inspects the path between a selector and its enclosing aggregate
-// (path[aggIdx]) and reports the range function applied over it, if any.
+// rangeFn inspects the WHOLE span between a selector and its enclosing
+// aggregate (path[aggIdx]) and reports the range function applied over it,
+// if any.
 //
-// For `sum by (path) (rate(m[5m]))` the path from the aggregate down to the
-// selector is [*AggregateExpr, *Call, *MatrixSelector], so the shape to look
-// for is: the selector's immediate parent is a *parser.MatrixSelector and
-// its parent is a *parser.Call naming a recordable function.
+// The general rule this enforces: sum(f(x)) equals f(sum(x)) only for the
+// three range functions in recordableRangeFns, and ONLY when one of them is
+// the entire span. Anything else standing between the aggregate and the
+// selector -- a second function wrapped around the rate, a bare comparison,
+// a subquery, redundant nesting -- transforms or filters the values before
+// the aggregation ever sees them, and there is no general argument that
+// commutes an aggregation with an arbitrary intervening node. So the span
+// is checked as a whole, not by naming particular shapes that are known to
+// be unsafe: it must be either EMPTY (the aggregate reads the selector's
+// instant vector directly) or EXACTLY [*parser.Call, *parser.MatrixSelector]
+// naming a function in recordableRangeFns. Every other span refuses, naming
+// what it found.
 //
-// unsafe is true, with reason explaining why, whenever this cannot be
-// answered safely:
+// This replaces two earlier, narrower rulings that both said less than they
+// were read to mean:
 //
-//   - a *parser.SubqueryExpr anywhere between the selector and the
-//     aggregate (as in `rate(m[5m:1m])`) evaluates the selector over a
-//     sliding window before rate ever sees it, which this package does not
-//     attempt to reason about;
-//   - a matrix selector under any function outside recordableRangeFns --
-//     max_over_time, avg_over_time, or any other -- does not commute with
-//     pre-aggregation the way rate, irate and increase do;
-//   - an INSTANT function applied directly to the selector -- abs(m),
-//     clamp_min(m, 0) -- transforms the value before aggregation ever sees
-//     it, and sum(abs(x)) is not abs(sum(x)) any more than sum(rate(x)) is
-//     rate(sum(x)). This is checked by the selector's IMMEDIATE parent
-//     alone, so a function nested under a range function is unaffected:
-//     `label_replace(rate(m[5m]))` has a *MatrixSelector between the
-//     selector and label_replace's Call, and that shape hits the case
-//     above instead.
+//   - "an instant function directly above the selector does not commute
+//     with pre-aggregation" was checked by looking at the selector's
+//     IMMEDIATE parent alone. That is correct for `sum(abs(m))`, but
+//     "directly above" was never re-examined once a `rate` could sit
+//     between the function and the selector: `sum(clamp_max(rate(m[5m]),
+//     1))` has rate's own *MatrixSelector as the selector's immediate
+//     parent, which looked exactly like the safe `sum(rate(m[5m]))` case
+//     even though clamp_max sits above it, unexamined, and does not
+//     commute with sum either.
+//   - "a binary operation against a scalar is unaffected: there is no
+//     matching" is true about MATCHING -- see joinBelowAggregate, which
+//     rightly leaves `m > 5` alone -- but false about COMMUTING: sum(m >
+//     5) sums only the series that pass the filter, while sum(m) > 5
+//     filters the sum itself, and those are different numbers. The old
+//     code never asked whether a bare comparison commutes with sum at
+//     all; it only asked whether it was a join.
+//
+// The fix for both is the same rule stated once: check every node between
+// the aggregate and the selector, not just the one or two nearest it, and
+// require the whole span to be a shape known to commute rather than merely
+// absent from a list of shapes known not to. This also subsumes the
+// subquery scan and the plain-Call case this function used to check
+// separately -- a *parser.SubqueryExpr or a lone *parser.Call now simply
+// fails to match the one safe span shape below, rather than being named as
+// a special case.
+//
+// *parser.ParenExpr nodes are skipped when the span is built: `sum by
+// (path) ((rate(m[5m])))` reads identically to the version without the
+// redundant parentheses, and refusing on punctuation alone would be
+// indefensible to a user reading the refusal. No other node is exempted.
 func rangeFn(path []parser.Node, aggIdx int) (fn string, window time.Duration, unsafe bool, reason string) {
-	for i := aggIdx + 1; i < len(path); i++ {
-		if _, ok := path[i].(*parser.SubqueryExpr); ok {
-			return "", 0, true, "a subquery evaluates it over a sliding window before any range function sees it"
+	var between []parser.Node
+	for _, n := range path[aggIdx+1:] {
+		if _, ok := n.(*parser.ParenExpr); ok {
+			continue
 		}
+		between = append(between, n)
 	}
-	if len(path) == 0 {
-		return "", 0, false, ""
-	}
-	switch parent := path[len(path)-1].(type) {
-	case *parser.MatrixSelector:
-		if len(path) < 2 {
-			return "", 0, true, "a matrix selector with nothing recognisable applying it"
-		}
-		call, ok := path[len(path)-2].(*parser.Call)
-		if !ok {
-			return "", 0, true, "a matrix selector with nothing recognisable applying it"
-		}
-		if !recordableRangeFns[call.Func.Name] {
-			return "", 0, true, fmt.Sprintf("%s does not commute with pre-aggregation the way rate, irate and increase do", call.Func.Name)
-		}
-		return call.Func.Name, parent.Range, false, ""
-	case *parser.Call:
-		return "", 0, true, fmt.Sprintf("%s(...) is applied to it before aggregation, and does not commute with pre-aggregation", parent.Func.Name)
-	default:
+	if len(between) == 0 {
 		// Nothing wraps the selector at all beyond the aggregate itself:
 		// the aggregation reads its instant vector directly, which is Fn's
 		// zero value.
 		return "", 0, false, ""
 	}
+	if len(between) == 2 {
+		if call, ok := between[0].(*parser.Call); ok {
+			if ms, ok := between[1].(*parser.MatrixSelector); ok {
+				if !recordableRangeFns[call.Func.Name] {
+					return "", 0, true, fmt.Sprintf("%s does not commute with pre-aggregation the way rate, irate and increase do", call.Func.Name)
+				}
+				return call.Func.Name, ms.Range, false, ""
+			}
+		}
+	}
+	return "", 0, true, "something other than a bare rate, irate or increase sits between it and the aggregation, and does not commute with pre-aggregation"
 }
 
 // joinBelowAggregate reports whether a vector-vector binary operation sits
@@ -361,7 +380,14 @@ func rangeFn(path []parser.Node, aggIdx int) (fn string, window time.Duration, u
 // unconditionally is the safe, simple answer.
 //
 // A binary operation against a SCALAR (`m > 5`) has VectorMatching == nil:
-// there is no matching, so it does not trigger this.
+// there is no matching, so it does not trigger this -- correctly: nothing
+// here needs every label just so a match can succeed. That used to be read
+// as "so a scalar comparison below the aggregate is fine," which is a
+// different, false claim: sum(m > 5) filters the raw series before summing
+// them, which is not the same number as sum(m) > 5. Whether a node between
+// the aggregate and the selector COMMUTES with the aggregation is rangeFn's
+// question, not this one, and rangeFn now refuses a bare comparison there
+// for exactly that reason.
 func joinBelowAggregate(path []parser.Node, aggIdx int) (reason string, unsafe bool) {
 	for i := aggIdx + 1; i < len(path); i++ {
 		if be, ok := path[i].(*parser.BinaryExpr); ok && be.VectorMatching != nil {

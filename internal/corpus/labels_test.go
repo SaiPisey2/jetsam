@@ -97,13 +97,70 @@ func TestLabelsNeeded(t *testing.T) {
 			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
 		},
 		{
-			// label_replace nested under rate is unaffected: a
-			// *MatrixSelector sits between the selector and rate's Call, so
-			// the instant-function check above never sees label_replace at
-			// all, and the range function is still recorded normally.
-			name:  "label_replace nested under rate is unaffected",
+			// label_replace nested under rate now refuses -- it is no longer
+			// the only thing between the selector and the aggregate. The span
+			// is [Call(label_replace), Call(rate), MatrixSelector], three
+			// nodes, not the one recognised shape of exactly [Call,
+			// MatrixSelector]. jetsam does not reason about whether
+			// label_replace itself commutes with the aggregation -- it only
+			// recognises a bare rate, irate or increase as the entire span --
+			// so this refuses, over-conservatively but safely, rather than
+			// assume a function it has not examined is harmless.
+			name:  "label_replace nested under rate now refuses",
 			query: `sum by (path) (label_replace(rate(jetsam_demo_requests_total[5m]), "x", "$1", "pod", "(.*)"))`,
-			want:  LabelNeed{Required: []string{"path", "pod"}, Op: "sum", OpSafe: true, Fn: "rate", Window: 5 * time.Minute},
+			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
+		},
+		{
+			// Redundant parentheses around a recordable range function must
+			// not force a refusal: *parser.ParenExpr is skipped when the span
+			// between the aggregate and the selector is built, so this reads
+			// identically to the version without them.
+			name:  "redundant parentheses around rate do not force a refusal",
+			query: `sum by (path) ((rate(jetsam_demo_requests_total[5m])))`,
+			want:  LabelNeed{Required: []string{"path"}, Op: "sum", OpSafe: true, Fn: "rate", Window: 5 * time.Minute},
+		},
+		{
+			// clamp_max wrapped around rate -- the shape this Critical fix
+			// exists for. Before the fix, rangeFn looked only at the
+			// selector's immediate parent (rate's own MatrixSelector) and
+			// never saw clamp_max sitting above it, so this wrongly proposed
+			// sum_rate5m. sum(clamp_max(rate(x), 1)) is not
+			// clamp_max(sum(rate(x)), 1).
+			name:  "clamp_max wrapped around rate refuses",
+			query: `sum by (path) (clamp_max(rate(jetsam_demo_requests_total[5m]), 1))`,
+			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
+		},
+		{
+			name:  "round wrapped around rate refuses",
+			query: `sum by (path) (round(rate(jetsam_demo_requests_total[5m])))`,
+			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
+		},
+		{
+			name:  "abs wrapped around rate refuses",
+			query: `sum by (path) (abs(rate(jetsam_demo_requests_total[5m])))`,
+			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
+		},
+		{
+			// A scalar comparison BELOW the aggregate but ABOVE a rate:
+			// sum(rate(x) > 5) sums only the series whose rate cleared 5, a
+			// different number from sum(rate(x)) > 5. joinBelowAggregate
+			// correctly leaves this alone (no VectorMatching, so no join),
+			// but rangeFn must still refuse it: the span between the
+			// aggregate and the selector is [BinaryExpr, Call(rate),
+			// MatrixSelector], not the recognised two-node shape.
+			name:  "a scalar comparison above rate but below the aggregate refuses",
+			query: `sum by (path) (rate(jetsam_demo_requests_total[5m]) > 5)`,
+			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
+		},
+		{
+			// The same trap with no range function at all: sum(m > 5) sums
+			// the filtered series, sum(m) > 5 filters the sum. Before this
+			// fix, a BinaryExpr as the selector's immediate parent hit
+			// rangeFn's "nothing wraps the selector" default case and was
+			// wrongly read as safe, proposing plain "sum".
+			name:  "a scalar comparison directly over the selector refuses",
+			query: `sum by (path) (jetsam_demo_requests_total > 5)`,
+			want:  LabelNeed{All: true, Op: "sum", OpSafe: true},
 		},
 		{
 			name:  "a query that does not touch the metric needs nothing from it",
