@@ -347,6 +347,31 @@ func TestRewriteConsumerLeavesNearMissesAlone(t *testing.T) {
 	}
 }
 
+// TestRewriteConsumerDeclinesAnAggregateItCannotUnwrap is Important 2: an
+// aggregate that reads p.Metric through a shape innerSelector cannot
+// unwrap -- here, rate wrapped in label_replace -- must be declined with a
+// reason, not silently reported as "no aggregate of this metric found
+// here." Before this fix, vs == nil on its own was read as "unrelated",
+// which is false: this query plainly reads m_total, jetsam just does not
+// recognise the shape well enough to compare it against the rule.
+func TestRewriteConsumerDeclinesAnAggregateItCannotUnwrap(t *testing.T) {
+	p := fixtureProposal()
+	const query = `sum by (path) (label_replace(rate(m_total[5m]), "x", "$1", "pod", "(.*)")) > 1`
+	got, declined, err := RewriteConsumer(query, p)
+	if err != nil {
+		t.Fatalf("RewriteConsumer: %v", err)
+	}
+	if got != query {
+		t.Fatalf("got %q, want unchanged %q", got, query)
+	}
+	if declined == "" {
+		t.Fatal("declined is empty, want a reason -- this query plainly aggregates m_total, jetsam just cannot unwrap the shape")
+	}
+	if !strings.Contains(declined, "shape jetsam does not recognise") {
+		t.Errorf("declined = %q, want it to say the shape is unrecognised", declined)
+	}
+}
+
 // TestRewriteConsumerToleratesRuleNameAlreadyPresentElsewhere covers Minor
 // 1 from this round's review: the OLD check only asked whether the
 // rewritten text mentioned p.RuleName ANYWHERE, which a query that already

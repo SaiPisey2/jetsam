@@ -200,9 +200,34 @@ func validateRewrite(out, ruleName string, before, wantNewRefs int) error {
 // never touched it at all, and a caller reporting on this proposal's
 // consumers needs to be able to tell the two apart. See RewriteConsumer's
 // own doc comment for why refusing rather than guessing matters here.
+//
+// innerSelector only recognises two shapes: a bare selector, and a single
+// range function wrapped directly around a matrix selector. Anything else
+// -- a Call with more than one argument, a BinaryExpr, a nested Call --
+// makes it return a nil vs, and vs == nil is NOT by itself the same claim
+// as "this aggregate does not read p.Metric at all":
+// `label_replace(rate(m[5m]), ...)` reads m just as much as `rate(m[5m])`
+// does, innerSelector simply does not unwrap it. Reporting that as
+// "unrelated" -- indistinguishable from an aggregate over a completely
+// different metric -- is exactly the gap RewriteConsumer's own doc comment
+// says must not exist: a decline and "nothing here" must never look the
+// same. countSelectors answers the narrower, always-answerable question
+// instead: does agg's expression contain a selector of p.Metric ANYWHERE,
+// regardless of shape. A hit there with vs == nil is a genuine near miss --
+// recognised as touching the metric, but through a shape this package does
+// not know how to compare -- and gets declined with a reason, rather than
+// silently passed through as unrelated.
 func matchAggregate(agg *parser.AggregateExpr, p aggregate.Proposal, win time.Duration) (matched bool, reason string) {
 	vs, fn, aggWin, isFn := innerSelector(agg.Expr)
-	if vs == nil || vs.Name != p.Metric {
+	if vs == nil {
+		if countSelectors(agg.Expr, p.Metric) > 0 {
+			return false, "aggregates the metric through a shape jetsam does not recognise, so it is left reading the raw series"
+		}
+		// Nothing here reads p.Metric at all -- not a near miss, just an
+		// unrelated aggregate this proposal has no opinion about.
+		return false, ""
+	}
+	if vs.Name != p.Metric {
 		// Nothing here reads p.Metric at all -- not a near miss, just an
 		// unrelated aggregate this proposal has no opinion about.
 		return false, ""
